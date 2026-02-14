@@ -139,15 +139,39 @@ python claude_status.py --theme ocean
 
 ### Configurable Bar Size
 
-Choose how wide the progress bars appear — small (4 chars), medium (8 chars, default), or large (12 chars):
+Choose how wide the progress bars appear — from small (4 chars) to large (12 chars), with medium (8 chars) as default:
 
 ```bash
-python claude_status.py --bar-size small    # ━━━━
-python claude_status.py --bar-size medium   # ━━━━━━━━
-python claude_status.py --bar-size large    # ━━━━━━━━━━━━
+python claude_status.py --bar-size small          # ━━━━
+python claude_status.py --bar-size small-medium   # ━━━━━━
+python claude_status.py --bar-size medium         # ━━━━━━━━
+python claude_status.py --bar-size medium-large   # ━━━━━━━━━━
+python claude_status.py --bar-size large          # ━━━━━━━━━━━━
 ```
 
 The bars automatically clamp to your terminal width so they never wrap to the next line.
+
+### Presets
+
+Apply a full configuration in one command. Useful when Claude Code notifications (MCP errors, migration notices) overlap with the status bar:
+
+```bash
+python claude_status.py --preset minimal    # compact bar, hides plan/model/context
+python claude_status.py --preset default    # restore standard layout
+```
+
+Or via the slash command:
+```
+/pulse minimal
+/pulse default preset
+```
+
+| Preset | What it does |
+|--------|-------------|
+| `minimal` | Small bars, compact labels (S/W), hides plan + model + context, 60% max width |
+| `default` | Standard bars, full labels, all sections visible, 80% max width |
+
+The `minimal` preset is recommended if your terminal is narrow or Claude Code frequently shows notifications beside the status line.
 
 ### Extra Credits (Auto-detected)
 
@@ -315,13 +339,15 @@ cd claude-pulse
 
 ```bash
 python claude_status.py --install
+
+# Or: python3 claude_status.py --install
 ```
 
 This adds the status line command to your `~/.claude/settings.json`.
 
 #### 3. Restart Claude Code
 
-Close and reopen Claude Code. The status bar appears at the bottom of your terminal.
+You may need to close and reopen Claude Code. The status bar appears at the bottom of your terminal.
 
 That's it. No virtual environments, no dependencies, no build steps.
 
@@ -331,7 +357,7 @@ Copy the pulse command file to your Claude Code commands directory:
 
 ```bash
 # Linux/Mac
-cp pulse.md ~/.claude/commands/pulse.md
+mkdir -p ~/.claude/commands && cp pulse.md ~/.claude/commands/pulse.md
 
 # Windows
 copy pulse.md %USERPROFILE%\.claude\commands\pulse.md
@@ -412,7 +438,9 @@ Edit `config.json` directly or use the CLI flags:
 | `--hide <parts>` | Disable comma-separated parts |
 | `--animate on\|off` | Toggle rainbow animation (default: off) |
 | `--text-color <name>` | Set the text colour for labels/percentages (default: auto) |
-| `--bar-size <small\|medium\|large>` | Set progress bar width: 4, 8, or 12 chars (default: medium) |
+| `--preset <name>` | Apply a preset config bundle: `minimal`, `default` |
+| `--bar-size <size>` | Set progress bar width: 4–12 chars (default: medium) |
+| `--max-width <20-100>` | Max status line width as % of terminal (default: 80) |
 | `--bar-style <name>` | Set bar character style (default: classic) |
 | `--layout <name>` | Set text layout (default: standard) |
 | `--currency <symbol>` | Set currency symbol for extra credits (default: £) |
@@ -487,7 +515,7 @@ Change how labels, bars, and percentages are arranged:
 | Layout | Example |
 |--------|---------|
 | `standard` | `Session ━━━━━━━━ 42% 3h 12m \| Weekly ━━━━━━━━ 67% \| Max 20x` |
-| `compact` | `S ━━━━━━━━ 42% 3h 12m \| W ━━━━━━━━ 67% \| Max 20x` |
+| `compact` | `D ━━━━━━━━ 42% 3h 12m \| W ━━━━━━━━ 67% \| Max 20x` |
 | `minimal` | `━━━━━━━━ 42% \| ━━━━━━━━ 67%` |
 | `percent-first` | `42% ━━━━━━━━ 3h 12m \| 67% ━━━━━━━━ \| Max 20x` |
 

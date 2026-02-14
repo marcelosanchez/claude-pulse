@@ -18,8 +18,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 DEFAULT_CACHE_TTL = 60
-BAR_SIZES = {"small": 4, "medium": 8, "large": 12}
+BAR_SIZES = {"small": 4, "small-medium": 6, "medium": 8, "medium-large": 10, "large": 12}
 DEFAULT_BAR_SIZE = "medium"
+DEFAULT_MAX_WIDTH_PCT = 80  # percentage of terminal width to use
 FILL = "\u2501"   # ━ (thin horizontal bar)
 EMPTY = "\u2500"   # ─ (thin line)
 
@@ -205,6 +206,43 @@ DEFAULT_SHOW = {
     "claude_update": False,
     "weekly_timer": True,
     "user": True,
+}
+
+# Presets — one-command config bundles
+PRESETS = {
+    "minimal": {
+        "description": "Compact bar that leaves room for Claude Code notifications",
+        "config": {
+            "bar_size": "small",
+            "layout": "compact",
+            "max_width": 60,
+        },
+        "show_overrides": {
+            "plan": False,
+            "model": False,
+            "context": False,
+            "sparkline": False,
+            "runway": False,
+            "status_message": False,
+            "streak": False,
+        },
+    },
+    "default": {
+        "description": "Factory reset — all settings back to defaults",
+        "config": {
+            "theme": "default",
+            "text_color": "auto",
+            "animate": False,
+            "bar_size": DEFAULT_BAR_SIZE,
+            "bar_style": DEFAULT_BAR_STYLE,
+            "layout": DEFAULT_LAYOUT,
+            "max_width": DEFAULT_MAX_WIDTH_PCT,
+            "context_format": "percent",
+            "extra_display": "auto",
+            "currency": "\u00a3",
+        },
+        "show_overrides": dict(DEFAULT_SHOW),
+    },
 }
 
 # Sparkline and history constants
@@ -447,6 +485,7 @@ def load_config():
     data.setdefault("animate", False)
     data.setdefault("text_color", "auto")
     data.setdefault("bar_size", DEFAULT_BAR_SIZE)
+    data.setdefault("max_width", DEFAULT_MAX_WIDTH_PCT)
     data.setdefault("bar_style", DEFAULT_BAR_STYLE)
     data.setdefault("layout", DEFAULT_LAYOUT)
     data.setdefault("context_format", "percent")
@@ -2008,20 +2047,24 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
     bstyle = config.get("bar_style", DEFAULT_BAR_STYLE)
     layout = config.get("layout", DEFAULT_LAYOUT)
 
-    # Terminal width clamping — prevent bars from causing line wrapping
-    # Estimate: each section ≈ bw + 15 chars of text, up to 4 sections + separators
+    # Terminal width clamping — use a percentage of terminal width (default 80%)
+    # to leave room for other Claude Code UI elements sharing the status line
     try:
         term_width = shutil.get_terminal_size((120, 24)).columns
+        max_width_pct = config.get("max_width", DEFAULT_MAX_WIDTH_PCT)
+        if not (isinstance(max_width_pct, int) and 20 <= max_width_pct <= 100):
+            max_width_pct = DEFAULT_MAX_WIDTH_PCT
+        effective_width = (term_width * max_width_pct) // 100
         # Count how many bar sections we'll render
         num_bars = sum(1 for k in ("session", "weekly") if show.get(k, True))
         extra = usage.get("extra_usage")
         if extra and extra.get("is_enabled") and not config.get("extra_hidden", False):
             num_bars += 1
-        # Each bar section: "Label " + bar + " XX% Xh XXm" ≈ bw + 20
+        # Each bar section ≈ bw + 25 chars of labels/percentage/timer
         # Separators: " | " = 3 chars each
-        # Plan name: ~10 chars, update indicator: ~20 chars
-        overhead = num_bars * 20 + (num_bars - 1) * 3 + 30
-        max_bar_width = max(2, (term_width - overhead) // max(num_bars, 1))
+        # Plan + update indicators + model ≈ 40 chars
+        overhead = num_bars * 25 + max(num_bars - 1, 0) * 3 + 40
+        max_bar_width = max(2, (effective_width - overhead) // max(num_bars, 1))
         if bw > max_bar_width:
             bw = max_bar_width
     except Exception:
@@ -2251,6 +2294,35 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
             if text_color_code:
                 line = apply_text_color(line, text_color_code)
 
+    # Final truncation — clip visible characters to effective terminal width
+    # so the line never spills into Claude Code's side notification area
+    try:
+        term_width = shutil.get_terminal_size((120, 24)).columns
+        max_width_pct = config.get("max_width", DEFAULT_MAX_WIDTH_PCT)
+        if not (isinstance(max_width_pct, int) and 20 <= max_width_pct <= 100):
+            max_width_pct = DEFAULT_MAX_WIDTH_PCT
+        max_visible = (term_width * max_width_pct) // 100
+        visible_count = 0
+        cut = None
+        i = 0
+        while i < len(line):
+            if line[i] == "\033":
+                # Skip ANSI escape sequence
+                j = i + 1
+                while j < len(line) and j < i + 25 and line[j] not in "ABCDEFGHJKSTfmnsulh":
+                    j += 1
+                i = j + 1 if j < len(line) else j
+                continue
+            visible_count += 1
+            if visible_count > max_visible:
+                cut = i
+                break
+            i += 1
+        if cut is not None:
+            line = line[:cut] + RESET
+    except Exception:
+        pass
+
         return line + "\n"
 
 
@@ -2468,6 +2540,41 @@ def cmd_hide(parts_str):
     utf8_print(f"Disabled: {', '.join(parts)}")
 
 
+def cmd_preset(name):
+    """Apply a named preset configuration."""
+    if name not in PRESETS:
+        utf8_print(f"Unknown preset: {_sanitize(name)}")
+        utf8_print(f"\nAvailable presets:")
+        for pname, pdata in PRESETS.items():
+            utf8_print(f"  {BOLD}{pname:<10}{RESET} {pdata['description']}")
+        return
+    preset = PRESETS[name]
+    config = load_config()
+    # Apply config overrides (bar_size, layout, max_width, etc.)
+    for key, val in preset["config"].items():
+        config[key] = val
+    # Apply show/hide overrides — preserve update and claude_update
+    for key, val in preset["show_overrides"].items():
+        config["show"][key] = val
+    # Always keep update notifications on
+    config["show"]["update"] = True
+    config["show"]["claude_update"] = True
+    save_config(config)
+    try:
+        os.remove(get_cache_path())
+    except OSError:
+        pass
+    utf8_print(f"Preset {BOLD}{name}{RESET} applied!")
+    utf8_print(f"  {preset['description']}")
+    # Show a preview
+    demo_usage = {
+        "five_hour": {"utilization": 42, "resets_at": None},
+        "seven_day": {"utilization": 67, "resets_at": None},
+    }
+    line = build_status_line(demo_usage, "Max 20x", config)
+    utf8_print(f"  Preview: {line}")
+
+
 def cmd_print_config():
     """Print the current configuration summary."""
     config = load_config()
@@ -2486,6 +2593,8 @@ def cmd_print_config():
     bs = config.get("bar_size", DEFAULT_BAR_SIZE)
     bw_display = BAR_SIZES.get(bs, BAR_SIZES[DEFAULT_BAR_SIZE])
     utf8_print(f"  Bar size:  {bs} ({bw_display} chars)")
+    mw = config.get("max_width", DEFAULT_MAX_WIDTH_PCT)
+    utf8_print(f"  Max width: {mw}% of terminal")
     bst = config.get("bar_style", DEFAULT_BAR_STYLE)
     bst_chars = BAR_STYLES.get(bst, BAR_STYLES[DEFAULT_BAR_STYLE])
     utf8_print(f"  Bar style: {bst} ({bst_chars[0]}{bst_chars[1]})")
@@ -2607,6 +2716,16 @@ def main():
 
     if "--install" in args:
         install_status_line()
+        return
+
+    if "--preset" in args:
+        idx = args.index("--preset")
+        if idx + 1 < len(args):
+            cmd_preset(args[idx + 1].lower())
+        else:
+            utf8_print("Usage: --preset <name>\n")
+            for pname, pdata in PRESETS.items():
+                utf8_print(f"  {BOLD}{pname:<10}{RESET} {pdata['description']}")
         return
 
     if "--show-all" in args:
@@ -2738,10 +2857,33 @@ def main():
             demo_bar = f"{GREEN}{FILL * bw}{RESET}"
             utf8_print(f"Bar size: {BOLD}{val}{RESET} ({bw} chars)  {demo_bar}")
         else:
-            utf8_print(f"Usage: --bar-size <small|medium|large>")
+            utf8_print(f"Usage: --bar-size <{'|'.join(BAR_SIZES.keys())}>")
             for name, width in BAR_SIZES.items():
                 demo = f"{GREEN}{FILL * width}{RESET}"
-                utf8_print(f"  {name:<8} {demo}  ({width} chars)")
+                utf8_print(f"  {name:<14} {demo}  ({width} chars)")
+        return
+
+    if "--max-width" in args:
+        idx = args.index("--max-width")
+        if idx + 1 < len(args):
+            try:
+                val = int(args[idx + 1])
+                if not (20 <= val <= 100):
+                    utf8_print("max-width must be between 20 and 100")
+                    return
+            except ValueError:
+                utf8_print("max-width must be a number (percentage of terminal width)")
+                return
+            config = load_config()
+            config["max_width"] = val
+            save_config(config)
+            try:
+                os.remove(get_cache_path())
+            except OSError:
+                pass
+            utf8_print(f"Max width: {BOLD}{val}%{RESET} of terminal width")
+        else:
+            utf8_print("Usage: --max-width <20-100>  (percentage, default 80)")
         return
 
     if "--bar-style" in args:
@@ -3052,9 +3194,22 @@ def main():
             line = "Access denied \u2014 check your subscription"
         else:
             line = f"API error: {e.code}"
-    except urllib.error.URLError:
+    except urllib.error.URLError as e:
         usage = None
-        line = "Network error \u2014 retrying next refresh"
+        reason = getattr(e, "reason", None)
+        is_ssl = False
+        try:
+            import ssl
+            is_ssl = isinstance(reason, ssl.SSLCertVerificationError)
+        except (ImportError, AttributeError):
+            is_ssl = reason and "CERTIFICATE_VERIFY_FAILED" in str(reason)
+        if is_ssl:
+            if sys.platform == "darwin":
+                line = "SSL cert error \u2014 run: /Applications/Python*/Install\\ Certificates.command"
+            else:
+                line = "SSL cert error \u2014 check Python SSL certificates"
+        else:
+            line = "Network error \u2014 retrying next refresh"
     except json.JSONDecodeError:
         usage = None
         line = "API returned invalid data"

@@ -37,9 +37,13 @@ If $ARGUMENTS matches `currency <symbol>` (e.g. `currency £`, `currency €`, `
 -> Run `--currency <symbol>` directly.
 -> Confirm: "Currency set to **<symbol>**. Extra usage will display as <symbol>amount."
 
-If $ARGUMENTS matches `bar-size <size>` or `bars <size>` (where size is `small`, `medium`, or `large`):
+If $ARGUMENTS matches `bar-size <size>` or `bars <size>` (where size is `small`, `small-medium`, `medium`, `medium-large`, or `large`):
 -> Run `--bar-size <size>` directly.
 -> Confirm: "Bar size set to **<size>**. The status line will update on the next refresh."
+
+If $ARGUMENTS matches `max-width <number>` (where number is 20–100):
+-> Run `--max-width <number>` directly.
+-> Confirm: "Max width set to **<number>%** of terminal. The status line will update on the next refresh."
 
 If $ARGUMENTS matches `bar-style <name>` or `style <name>` (where name is `classic`, `block`, `shade`, `pipe`, `dot`, `square`, or `star`):
 -> Run `--bar-style <name>` directly.
@@ -68,6 +72,12 @@ If $ARGUMENTS matches `weekly-timer-prefix <text>` or `reset-prefix <text>`:
 -> Run `--weekly-timer-prefix <text>` directly.
 -> Confirm: "Weekly timer prefix set to **<text>**."
 -> If empty string, confirm: "Weekly timer prefix removed. Reset time will show without a prefix."
+
+If $ARGUMENTS matches `preset <name>` or `minimal` or `default preset`:
+-> If $ARGUMENTS is just `minimal`, run `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --preset minimal`
+-> Otherwise extract the preset name and run `--preset <name>`
+-> Show the output including the preview line.
+-> Explain: "This preset configures bar size, layout, and visibility in one step. Use `/pulse default preset` to restore defaults."
 
 If $ARGUMENTS is `update`:
 -> Run `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --update` and show the output.
@@ -193,10 +203,12 @@ multiSelect: false
 Options:
   - "Medium (Recommended)" — "8 characters — balanced default"
   - "Small" — "4 characters — compact, more room for text"
+  - "Small-Medium" — "6 characters — between compact and balanced"
+  - "Medium-Large" — "10 characters — slightly wider than default"
   - "Large" — "12 characters — wide bars, more visual detail"
 ```
 
-Apply with `--bar-size <small|medium|large>`.
+Apply with `--bar-size <small|small-medium|medium|medium-large|large>`.
 
 **Step 7:** Check extra credits status by running `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --config` silently and checking the "Extra Credits" section.
 
