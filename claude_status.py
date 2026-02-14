@@ -2323,7 +2323,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
     except Exception:
         pass
 
-        return line + "\n"
+    return line + "\n"
 
 
 # ---------------------------------------------------------------------------

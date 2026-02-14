@@ -2,6 +2,8 @@
   "cache_ttl_seconds": 60,
   "theme": "dark",
   "rainbow_bars": true,
+  "bar_size": "medium",
+  "max_width": 100,
   "show": {
     "session": true,
     "weekly": true,
