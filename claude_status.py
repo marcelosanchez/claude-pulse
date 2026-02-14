@@ -45,10 +45,19 @@ for _f, _e in BAR_STYLES.values():
 LAYOUTS = ("standard", "compact", "minimal", "percent-first")
 DEFAULT_LAYOUT = "standard"
 
-# ANSI colour codes
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-RED = "\033[31m"
+# ANSI colour codes - 5-level gradient
+GREEN = "\033[38;2;56;166;96m"           # #38a660 (0-20%, menta)
+GREEN_YELLOW = "\033[38;2;150;181;86m"  # #96b556 (20-40%, transición)
+YELLOW = "\033[38;2;245;197;75m"        # #f5c54b (40-60%, dorado)
+YELLOW_RED = "\033[38;2;238;136;84m"    # #ee8844 (60-80%, transición)
+RED = "\033[38;2;231;76;60m"            # #e74c3c (80-100%, coral)
+BLUE_MODEL = "\033[38;2;22;52;140m"     # #16348c (modelo)
+PURPLE_USER = "\033[38;2;87;35;100m"    # #572364 (usuario)
+GREEN_DARK = "\033[38;2;29;86;50m"      # #1d5632
+GREEN_YELLOW_DARK = "\033[38;2;78;94;44m"  # #4e5e2c
+YELLOW_DARK = "\033[38;2;127;102;39m"     # #7f6627
+YELLOW_RED_DARK = "\033[38;2;124;71;35m"  # #7c4723
+RED_DARK = "\033[38;2;120;40;31m"        # #78281f
 DIM = "\033[2m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -56,6 +65,7 @@ CYAN = "\033[36m"
 BLUE = "\033[34m"
 MAGENTA = "\033[35m"
 WHITE = "\033[37m"
+GRAY = "\033[38;2;89;89;89m"           # #595959 (gris oscuro)
 BRIGHT_WHITE = "\033[97m"
 BRIGHT_GREEN = "\033[92m"
 BRIGHT_YELLOW = "\033[93m"
@@ -73,10 +83,11 @@ CANDY_PINK = "\033[38;5;213m"
 CANDY_PURPLE = "\033[38;5;141m"
 CANDY_CYAN = "\033[38;5;51m"
 
-# Theme definitions — each maps usage levels to ANSI colour codes
+# Theme definitions — each maps usage levels to ANSI colour codes (5-level gradient)
 # "rainbow" uses representative colours for previews; actual rendering is animated
 THEMES = {
-    "default": {"low": GREEN, "mid": YELLOW, "high": RED},
+    "default": {"low": GREEN, "low_mid": GREEN_YELLOW, "mid": YELLOW, "mid_high": YELLOW_RED, "high": RED},
+    "dark":    {"low": GREEN_DARK, "low_mid": GREEN_YELLOW_DARK, "mid": YELLOW_DARK, "mid_high": YELLOW_RED_DARK, "high": RED_DARK},
     "ocean":   {"low": CYAN, "mid": BLUE, "high": MAGENTA},
     "sunset":  {"low": YELLOW, "mid": ORANGE_256, "high": RED},
     "mono":    {"low": WHITE, "mid": WHITE, "high": BRIGHT_WHITE},
@@ -92,6 +103,7 @@ PLAN_NAMES = {
     "default_claude_pro": "Pro",
     "default_claude_max_5x": "Max 5x",
     "default_claude_max_20x": "Max 20x",
+    "default_claude_ai": "AI",
 }
 
 MODEL_SHORT_NAMES = {
@@ -118,16 +130,19 @@ MODEL_CONTEXT_WINDOWS = {
 }
 DEFAULT_CONTEXT_WINDOW = 200_000
 
+# Pre-compile regex patterns for sanitization to avoid recompilation on every call
+_ANSI_PATTERN = re.compile(r'\x1b[^a-zA-Z]*[a-zA-Z]')
+_CONTROL_PATTERN = re.compile(r'[\x00-\x09\x0b-\x1f\x7f-\x9f]')
+
 def _sanitize(text):
     """Strip ANSI/terminal escape sequences and control characters from untrusted strings."""
-    # Strip CSI (\x1b[...), OSC (\x1b]...), DCS (\x1bP...) and other escape sequences
-    cleaned = re.sub(r'\x1b[^a-zA-Z]*[a-zA-Z]', '', str(text))
-    # Strip remaining control characters (keep \n for multi-line contexts)
-    return re.sub(r'[\x00-\x09\x0b-\x1f\x7f-\x9f]', '', cleaned)
+    text = _ANSI_PATTERN.sub('', str(text))
+    return _CONTROL_PATTERN.sub('', text)
 
 # Named text colours for non-bar text (labels, percentages, separators)
 TEXT_COLORS = {
     "white": "\033[37m",
+    "gray": "\033[38;2;89;89;89m",      # #595959 (gris oscuro)
     "bright_white": "\033[97m",
     "cyan": "\033[36m",
     "blue": "\033[34m",
@@ -146,6 +161,7 @@ TEXT_COLORS = {
 # Accent text colour per theme — used in previews/demos to make each theme look distinct
 THEME_DEMO_TEXT = {
     "default": "green",
+    "dark":    "green",
     "ocean":   "cyan",
     "sunset":  "yellow",
     "mono":    "dim",
@@ -161,6 +177,7 @@ THEME_DEMO_TEXT = {
 # so the rainbow has something to contrast against
 THEME_TEXT_DEFAULTS = {
     "default": "white",
+    "dark":    "gray",
     "ocean":   "white",
     "sunset":  "white",
     "mono":    "dim",
@@ -175,18 +192,19 @@ THEME_TEXT_DEFAULTS = {
 DEFAULT_SHOW = {
     "session": True,
     "weekly": True,
-    "plan": True,
+    "plan": False,
     "timer": True,
     "extra": False,
-    "update": True,
+    "update": False,
     "sparkline": False,
     "runway": False,
     "status_message": False,
     "streak": False,
     "model": True,
     "context": True,
-    "claude_update": True,
+    "claude_update": False,
     "weekly_timer": True,
+    "user": True,
 }
 
 # Sparkline and history constants
@@ -378,13 +396,16 @@ def _atomic_json_write(filepath, data, indent=2):
 # Config
 # ---------------------------------------------------------------------------
 
+def _get_cache_base_path():
+    """Return platform-specific cache directory base path."""
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+
+
 def get_config_path():
     """Return path to user config — stored alongside cache, outside the repo."""
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    else:
-        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    config_dir = base / "claude-status"
+    config_dir = _get_cache_base_path() / "claude-status"
     _secure_mkdir(config_dir)
     return config_dir / "config.json"
 
@@ -395,13 +416,26 @@ def load_config():
 
     # User config takes priority, fall back to repo template
     data = {}
+    config_corrupted = False
     for path in (user_path, repo_path):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if path == user_path and not data:
+                config_corrupted = True
             break
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            if path == user_path and isinstance(e, json.JSONDecodeError):
+                config_corrupted = True
             continue
+
+    # Warn if user config was corrupted (save backup)
+    if config_corrupted and user_path.exists():
+        try:
+            backup_path = user_path.with_suffix(".backup.json")
+            shutil.copy2(user_path, backup_path)
+        except OSError:
+            pass
 
     # Clean up removed settings
     data.pop("rainbow_bars", None)
@@ -417,6 +451,7 @@ def load_config():
     data.setdefault("layout", DEFAULT_LAYOUT)
     data.setdefault("context_format", "percent")
     data.setdefault("extra_display", "auto")
+    data.setdefault("multiline", False)
     show = data.get("show", {})
     for key, default in DEFAULT_SHOW.items():
         show.setdefault(key, default)
@@ -488,17 +523,21 @@ def _cleanup_hooks():
 
 def get_state_dir():
     """Return the shared state/cache directory."""
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    else:
-        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    state_dir = base / "claude-status"
+    state_dir = _get_cache_base_path() / "claude-status"
     _secure_mkdir(state_dir)
     return state_dir
 
 
 def get_cache_path():
     return get_state_dir() / "cache.json"
+
+
+def _clear_cache():
+    """Safely remove cache file, ignoring errors."""
+    try:
+        os.remove(get_cache_path())
+    except OSError:
+        pass
 
 
 
@@ -546,6 +585,28 @@ def get_remote_commit():
         return None
 
 
+def _check_update_cache(cache_file: Path, ttl: int) -> dict:
+    """Check if update cache is fresh; return cached data or None."""
+    try:
+        with open(cache_file, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if time.time() - cached.get("timestamp", 0) < ttl:
+            return cached
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def _write_update_cache(cache_file: Path, data: dict) -> None:
+    """Write update check result to cache with timestamp."""
+    try:
+        data["timestamp"] = time.time()
+        with _secure_open_write(cache_file) as f:
+            json.dump(data, f)
+    except OSError:
+        pass
+
+
 def check_for_update():
     """Check if a newer version is available on GitHub. Returns True/False/None.
 
@@ -554,14 +615,10 @@ def check_for_update():
     state_dir = get_state_dir()
     update_cache = state_dir / "update_check.json"
 
-    # Read cached result
-    try:
-        with open(update_cache, "r", encoding="utf-8") as f:
-            cached = json.load(f)
-        if time.time() - cached.get("timestamp", 0) < UPDATE_CHECK_TTL:
-            return cached.get("update_available", False)
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
+    # Check cache first
+    cached = _check_update_cache(update_cache, UPDATE_CHECK_TTL)
+    if cached is not None:
+        return cached.get("update_available", False)
 
     # Perform the check
     local = get_local_commit()
@@ -573,19 +630,11 @@ def check_for_update():
         return None  # network error, skip silently
 
     update_available = local != remote
-
-    # Cache the result
-    try:
-        with _secure_open_write(update_cache) as f:
-            json.dump({
-                "timestamp": time.time(),
-                "update_available": update_available,
-                "local": local[:8],
-                "remote": remote[:8],
-            }, f)
-    except OSError:
-        pass
-
+    _write_update_cache(update_cache, {
+        "update_available": update_available,
+        "local": local[:8],
+        "remote": remote[:8],
+    })
     return update_available
 
 
@@ -614,14 +663,10 @@ def check_claude_code_update():
     state_dir = get_state_dir()
     update_cache = state_dir / "claude_code_update.json"
 
-    # Read cached result
-    try:
-        with open(update_cache, "r", encoding="utf-8") as f:
-            cached = json.load(f)
-        if time.time() - cached.get("timestamp", 0) < UPDATE_CHECK_TTL:
-            return cached.get("update_available", False)
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
+    # Check cache first
+    cached = _check_update_cache(update_cache, UPDATE_CHECK_TTL)
+    if cached is not None:
+        return cached.get("update_available", False)
 
     # Get installed version
     try:
@@ -643,7 +688,7 @@ def check_claude_code_update():
             headers={"User-Agent": "claude-pulse-update-checker"},
         )
         with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read(100_000).decode("utf-8"))
+            data = json.loads(resp.read(10_000).decode("utf-8"))
         remote_version = _sanitize(str(data.get("version", "")))
         if not remote_version:
             return None
@@ -651,19 +696,11 @@ def check_claude_code_update():
         return None
 
     update_available = _sanitize(local_version) != remote_version
-
-    # Cache the result
-    try:
-        with _secure_open_write(update_cache) as f:
-            json.dump({
-                "timestamp": time.time(),
-                "update_available": update_available,
-                "local": _sanitize(local_version),
-                "remote": remote_version,
-            }, f)
-    except OSError:
-        pass
-
+    _write_update_cache(update_cache, {
+        "update_available": update_available,
+        "local": _sanitize(local_version),
+        "remote": remote_version,
+    })
     return update_available
 
 
@@ -805,7 +842,7 @@ def cmd_update():
                             capture_output=True, text=True, timeout=10,
                             cwd=str(repo_dir),
                         )
-                    except Exception:
+                    except (subprocess.TimeoutExpired, OSError):
                         pass
                 utf8_print(f"  {YELLOW}Update aborted. Please try again or re-clone the repository.{RESET}")
                 return
@@ -830,7 +867,7 @@ def cmd_update():
                         utf8_print(f"\n  {BOLD}Changelog:{RESET}")
                         for ln in log_result.stdout.strip().split("\n"):
                             utf8_print(f"    {DIM}{_sanitize(ln)}{RESET}")
-                except Exception:
+                except (subprocess.TimeoutExpired, OSError):
                     pass
             # Clear all caches so the update indicator disappears immediately
             state_dir = get_state_dir()
@@ -852,11 +889,23 @@ def cmd_update():
 
 
 def read_cache(cache_path, ttl):
-    """Return the full cache dict if fresh, else None."""
+    """Return the full cache dict if fresh, else None.
+
+    If cache has _fetch_failed=True, use aggressive retry (3s) instead of TTL.
+    This ensures real-time updates after network recovery.
+    """
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             cached = json.load(f)
-        if time.time() - cached.get("timestamp", 0) < ttl:
+        ts = cached.get("timestamp", 0)
+        failed = cached.get("_fetch_failed", False)
+        age = time.time() - ts
+
+        # If previous fetch failed, retry aggressively every 3s
+        if failed and age < 3:
+            return None  # Force immediate retry
+        # Otherwise use normal TTL
+        if age < ttl:
             return cached
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
         pass
@@ -865,13 +914,18 @@ def read_cache(cache_path, ttl):
 
 _USAGE_CACHE_KEYS = {"five_hour", "seven_day", "extra_usage"}
 
-def write_cache(cache_path, line, usage=None, plan=None):
+def write_cache(cache_path, line, usage=None, plan=None, user=None, fetch_failed=False):
+    """Write cache with optional failure marker for intelligent retry."""
     try:
         data = {"timestamp": time.time(), "line": line}
         if usage is not None:
             data["usage"] = {k: v for k, v in usage.items() if k in _USAGE_CACHE_KEYS}
         if plan is not None:
             data["plan"] = plan
+        if user is not None:
+            data["user"] = user
+        if fetch_failed:
+            data["_fetch_failed"] = True
         with _secure_open_write(cache_path) as f:
             json.dump(data, f)
     except OSError:
@@ -950,16 +1004,22 @@ def _read_credential_data():
 
 
 def _extract_credentials(data):
-    """Extract token and plan from credential data dict."""
+    """Extract token, plan, and user info from credential data dict."""
     if not data:
-        return None, None
+        return None, None, None
     oauth = data.get("claudeAiOauth", {})
     token = oauth.get("accessToken")
     tier = oauth.get("rateLimitTier", "")
     if not token:
-        return None, None
+        return None, None, None
     plan = PLAN_NAMES.get(tier, _sanitize(tier.replace("default_claude_", "").replace("_", " ").title()))
-    return token, plan
+    # Try to extract user name from OAuth data
+    user = None
+    for key in ("name", "user_name", "display_name"):
+        if oauth.get(key):
+            user = _sanitize(oauth.get(key))
+            break
+    return token, plan, user
 
 
 
@@ -978,24 +1038,24 @@ def _refresh_oauth_token(refresh_token):
             method="POST",
         ) as resp:
             return json.loads(resp.read(100_000))
-    except Exception:
+    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, ValueError, OSError):
         return None
 
 
 def get_credentials():
-    """Read OAuth token from credentials file, macOS Keychain, or env var."""
+    """Read OAuth token, plan, and user from credentials file, macOS Keychain, or env var."""
     data, source = _read_credential_data()
     if data:
-        token, plan = _extract_credentials(data)
+        token, plan, user = _extract_credentials(data)
         if token:
-            return token, plan
+            return token, plan, user
 
     # Environment variable fallback (all platforms)
     env_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     if env_token:
-        return env_token, ""
+        return env_token, "", None
 
-    return None, None
+    return None, None, None
 
 
 def refresh_and_retry(plan):
@@ -1018,12 +1078,43 @@ def refresh_and_retry(plan):
 
 
 def fetch_usage(token):
+    """Fetch usage data from Anthropic API with schema validation."""
     with _authorized_request(
         "https://api.anthropic.com/api/oauth/usage",
         token,
         headers={"anthropic-beta": "oauth-2025-04-20", "Accept": "application/json"},
     ) as resp:
-        return json.loads(resp.read(1_000_000))  # 1 MB max
+        data = json.loads(resp.read(100_000))  # 100 KB max (typical response ~2-5 KB)
+
+    # Validate expected structure
+    required_keys = {"five_hour", "seven_day", "extra_usage"}
+    if not required_keys.issubset(data.keys()):
+        raise ValueError(f"Unexpected API schema: missing keys {required_keys - set(data.keys())}")
+    return data
+
+
+def fetch_user_info(token):
+    """Fetch user info from Anthropic API. Returns first name or None."""
+    if not token:
+        return None
+    try:
+        with _authorized_request(
+            "https://api.anthropic.com/api/oauth/profile",
+            token,
+            headers={"anthropic-beta": "oauth-2025-04-20", "Accept": "application/json"},
+        ) as resp:
+            data = json.loads(resp.read(50_000))
+            # Extract name from account data structure
+            account = data.get("account", {})
+            name = account.get("full_name") or account.get("display_name") or account.get("email")
+            if name:
+                name = _sanitize(name)
+                # Extract first name only (before space)
+                first_name = name.split()[0] if " " in name else name
+                return first_name if first_name else None
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1036,11 +1127,19 @@ def get_theme_colours(theme_name):
 
 
 def bar_colour(pct, theme):
-    """Return ANSI colour based on usage percentage using theme colours."""
+    """Return ANSI colour based on usage percentage using 5-level gradient.
+
+    Thresholds: 0-20 (low) → 20-40 (low-mid) → 40-60 (mid) → 60-80 (mid-high) → 80-100 (high)
+    Provides smooth color transition for better visual feedback.
+    """
     if pct >= 80:
         return theme["high"]
-    if pct >= 50:
+    if pct >= 60:
+        return theme.get("mid_high", theme["high"])  # Fallback for old themes
+    if pct >= 40:
         return theme["mid"]
+    if pct >= 20:
+        return theme.get("low_mid", theme["low"])  # Fallback for old themes
     return theme["low"]
 
 
@@ -1179,10 +1278,9 @@ def _append_history(usage):
     now = time.time()
     samples.append({"t": now, "s": session_pct, "w": weekly_pct})
 
-    # Prune entries older than 24 hours and cap entry count
+    # Prune entries older than 24 hours and cap entry count to 2000 (single pass)
     cutoff = now - HISTORY_MAX_AGE
-    samples = [s for s in samples if s.get("t", 0) > cutoff]
-    samples = samples[-2000:]  # prevent unbounded growth
+    samples = [s for s in samples if s.get("t", 0) > cutoff][-2000:]
 
     try:
         with _secure_open_write(_get_history_path()) as f:
@@ -1341,10 +1439,11 @@ def _save_stats(stats):
 
 
 def _calculate_streak(daily_dates, today):
-    """Calculate current and longest streak from date strings.
+    """Calculate current and longest streak from date strings (cached per day).
 
     Current streak counts consecutive days ending at today or yesterday.
     Returns (current_streak, longest_streak).
+    Cached in stats to avoid O(n) scan on every load.
     """
     if not daily_dates:
         return (0, 0)
@@ -1395,6 +1494,21 @@ def _calculate_streak(daily_dates, today):
     return (current_streak, longest)
 
 
+def _get_cached_streak(stats, today):
+    """Get streak from cache if today unchanged, else recalculate and cache."""
+    last_recalc = stats.get("_streak_recalc_date")
+    if last_recalc == today:
+        # Cache is fresh, use cached values
+        return (stats.get("current_streak", 0), stats.get("longest_streak", 0))
+
+    # Recalculate and cache
+    current, longest = _calculate_streak(stats.get("daily_dates", []), today)
+    stats["current_streak"] = current
+    stats["longest_streak"] = longest
+    stats["_streak_recalc_date"] = today
+    return (current, longest)
+
+
 def _check_milestone(total):
     """Check if total sessions hit a milestone. Returns message or None."""
     return STREAK_MILESTONES.get(total)
@@ -1418,8 +1532,7 @@ def _update_stats():
 
     stats["total_sessions"] = stats.get("total_sessions", 0) + 1
 
-    current, longest = _calculate_streak(daily_dates, today)
-    stats["current_streak"] = current
+    current, longest = _get_cached_streak(stats, today)
     stats["longest_streak"] = max(stats.get("longest_streak", 0), longest)
     stats["last_date"] = today
 
@@ -1447,14 +1560,14 @@ def cmd_stats():
     """Show full session stats summary."""
     stats = _load_stats()
     today = _today_local()
-    current, longest = _calculate_streak(stats.get("daily_dates", []), today)
+    current, longest = _get_cached_streak(stats, today)
 
     utf8_print(f"\n{BOLD}claude-pulse stats{RESET}\n")
     utf8_print(f"  First seen:     {_sanitize(str(stats.get('first_seen', 'unknown')))}")
     utf8_print(f"  Total sessions: {stats.get('total_sessions', 0)}")
     utf8_print(f"  Days active:    {len(set(stats.get('daily_dates', [])))}")
     utf8_print(f"  Current streak: {current}d")
-    utf8_print(f"  Longest streak: {max(stats.get('longest_streak', 0), longest)}d")
+    utf8_print(f"  Longest streak: {stats.get('longest_streak', 0)}d")
 
     milestone = _check_milestone(stats.get("total_sessions", 0))
     if milestone:
@@ -1552,10 +1665,14 @@ def _update_heatmap(usage):
     entry["samples"] = entry.get("samples", 0) + 1
     hours[hour_key] = entry
 
-    # Prune entries older than 28 days (672 hours)
-    cutoff = now - timedelta(days=28)
-    cutoff_key = cutoff.strftime("%Y-%m-%dT%H")
-    hours = {k: v for k, v in hours.items() if k >= cutoff_key}
+    # Prune old entries only 1x/day to avoid repeated string comparisons
+    last_prune = heatmap.get("_last_prune_date")
+    today = now.strftime("%Y-%m-%d")
+    if last_prune != today:
+        cutoff = now - timedelta(days=28)
+        cutoff_key = cutoff.strftime("%Y-%m-%dT%H")
+        hours = {k: v for k, v in hours.items() if k >= cutoff_key}
+        heatmap["_last_prune_date"] = today
 
     heatmap["hours"] = hours
 
@@ -1645,6 +1762,214 @@ def _render_heatmap(config=None):
     return "\n".join(lines)
 
 
+def get_analytics_path():
+    """Return path to analytics data file."""
+    return get_state_dir() / "analytics.json"
+
+
+def load_analytics():
+    """Load analytics data or return empty structure."""
+    try:
+        with open(get_analytics_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"samples": [], "daily_summaries": {}}
+
+
+def save_analytics(data):
+    """Save analytics data to file."""
+    try:
+        _atomic_json_write(get_analytics_path(), data)
+    except OSError:
+        pass
+
+
+def record_hourly_sample(usage_pct):
+    """Record hourly usage sample (call once per hour)."""
+    now = datetime.now(timezone.utc)
+    hour_key = now.strftime("%Y-%m-%dT%H:00:00Z")
+
+    analytics = load_analytics()
+
+    # Check if we already sampled this hour
+    samples = analytics.get("samples", [])
+    if samples and samples[-1].get("hour") == hour_key:
+        return
+
+    # Record new sample
+    samples.append({
+        "hour": hour_key,
+        "usage_pct": usage_pct,
+        "timestamp": now.timestamp(),
+    })
+
+    # Keep last 168 hours (7 days)
+    analytics["samples"] = samples[-168:]
+    save_analytics(analytics)
+
+
+def cmd_analytics():
+    """Display historical usage analytics and trends."""
+    analytics = load_analytics()
+    samples = analytics.get("samples", [])
+
+    if not samples:
+        utf8_print(f"\n{DIM}No analytics data yet. Check back after 1 hour of usage.{RESET}\n")
+        return
+
+    utf8_print(f"\n{BOLD}Claude-Pulse Usage Analytics{RESET}\n")
+
+    # Extract usage data
+    usage_values = [s["usage_pct"] for s in samples]
+    burn_rates = []
+
+    # Calculate hourly burn rates
+    for i in range(1, len(samples)):
+        prev = samples[i - 1]["usage_pct"]
+        curr = samples[i]["usage_pct"]
+        burn_rate = curr - prev
+        if burn_rate >= 0:  # Only count increases
+            burn_rates.append(burn_rate)
+
+    # Display trends
+    utf8_print(f"{BOLD}📊 HOURLY USAGE TREND (Last {min(len(samples), 24)} Hours){RESET}")
+
+    # Sparkline chart
+    for i in range(max(0, len(samples) - 24), len(samples)):
+        sample = samples[i]
+        pct = sample["usage_pct"]
+        bar_width = int(pct / 5)  # 0-20 chars
+        time_str = sample["hour"][11:16]  # HH:MM
+        utf8_print(f"  {time_str}: {GREEN}{'█' * bar_width}{RESET}{'░' * (20 - bar_width)} {pct:.0f}%")
+
+    # Statistics
+    if usage_values:
+        min_pct = min(usage_values)
+        max_pct = max(usage_values)
+        avg_pct = sum(usage_values) / len(usage_values)
+
+        utf8_print(f"\n{BOLD}📈 STATISTICS{RESET}")
+        utf8_print(f"  Current: {max_pct:.0f}%")
+        utf8_print(f"  Average: {avg_pct:.0f}%")
+        utf8_print(f"  High: {max_pct:.0f}% | Low: {min_pct:.0f}%")
+
+    # Burn rate analysis
+    if burn_rates:
+        avg_burn = sum(burn_rates) / len(burn_rates)
+        utf8_print(f"\n{BOLD}🔥 BURN RATE ANALYSIS{RESET}")
+        utf8_print(f"  Average: {avg_burn:.2f}%/hour")
+
+        # Predict when hitting 100%
+        if max_pct < 100:
+            hours_remaining = (100 - max_pct) / avg_burn if avg_burn > 0 else float('inf')
+            if hours_remaining < 1000:
+                eta_time = datetime.now(timezone.utc) + timedelta(hours=hours_remaining)
+                utf8_print(f"  ETA to 100%: {eta_time.strftime('%a %I:%M %p')} (~{hours_remaining:.0f}h)")
+            else:
+                utf8_print(f"  ETA to 100%: Beyond tracking window (stable usage)")
+
+    utf8_print(f"\n{BOLD}📋 RAW DATA{RESET}")
+    utf8_print(f"  Samples collected: {len(samples)}")
+    utf8_print(f"  Time span: {samples[0]['hour'] if samples else 'N/A'} → {samples[-1]['hour'] if samples else 'N/A'}\n")
+
+
+def cmd_interactive_setup():
+    """Interactive terminal setup wizard using simple prompts."""
+    utf8_print(f"\n{BOLD}Claude-Pulse Interactive Setup{RESET}\n")
+
+    config = load_config()
+
+    # Theme selection
+    utf8_print(f"{BOLD}1. Theme Selection{RESET}")
+    themes_list = list(THEMES.keys())
+    for i, theme_name in enumerate(themes_list, 1):
+        marker = "→" if theme_name == config.get("theme", "default") else " "
+        utf8_print(f"  {marker} {i}. {theme_name}")
+
+    try:
+        choice = input(f"\nEnter theme number (1-{len(themes_list)}): ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(themes_list):
+            config["theme"] = themes_list[int(choice) - 1]
+    except (ValueError, KeyboardInterrupt):
+        utf8_print(f"\n{DIM}Setup cancelled.{RESET}")
+        return
+
+    # Animation toggle
+    utf8_print(f"\n{BOLD}2. Rainbow Animation{RESET}")
+    utf8_print(f"  Current: {'ON' if config.get('animate') else 'OFF'}")
+    try:
+        choice = input("Enable animation? (y/n): ").strip().lower()
+        if choice == 'y':
+            config["animate"] = True
+        elif choice == 'n':
+            config["animate"] = False
+    except KeyboardInterrupt:
+        utf8_print(f"\n{DIM}Setup cancelled.{RESET}")
+        return
+
+    # Bar size
+    utf8_print(f"\n{BOLD}3. Bar Size{RESET}")
+    sizes = list(BAR_SIZES.keys())
+    for i, size in enumerate(sizes, 1):
+        marker = "→" if size == config.get("bar_size", DEFAULT_BAR_SIZE) else " "
+        utf8_print(f"  {marker} {i}. {size} ({BAR_SIZES[size]} chars)")
+
+    try:
+        choice = input(f"\nEnter bar size number (1-{len(sizes)}): ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(sizes):
+            config["bar_size"] = sizes[int(choice) - 1]
+    except (ValueError, KeyboardInterrupt):
+        utf8_print(f"\n{DIM}Setup cancelled.{RESET}")
+        return
+
+    # Multi-line layout
+    utf8_print(f"\n{BOLD}4. Multi-line Layout{RESET}")
+    utf8_print(f"  Current: {'ON' if config.get('multiline') else 'OFF'}")
+    utf8_print(f"  ON: usage metrics on line 1, context on line 2")
+    utf8_print(f"  OFF: all info on single line")
+    try:
+        choice = input("Enable multi-line? (y/n): ").strip().lower()
+        if choice == 'y':
+            config["multiline"] = True
+        elif choice == 'n':
+            config["multiline"] = False
+    except KeyboardInterrupt:
+        utf8_print(f"\n{DIM}Setup cancelled.{RESET}")
+        return
+
+    # Visibility toggles
+    utf8_print(f"\n{BOLD}5. Show/Hide Elements{RESET}")
+    show_config = config.get("show", DEFAULT_SHOW)
+    for key in ["session", "weekly", "model", "user", "extra"]:
+        try:
+            current = "ON" if show_config.get(key) else "OFF"
+            choice = input(f"  Show {key}? ({current}) [y/n/skip]: ").strip().lower()
+            if choice == 'y':
+                show_config[key] = True
+            elif choice == 'n':
+                show_config[key] = False
+        except KeyboardInterrupt:
+            utf8_print(f"\n{DIM}Setup cancelled.{RESET}")
+            return
+    config["show"] = show_config
+
+    # Save and show preview
+    save_config(config)
+    _clear_cache()
+
+    utf8_print(f"\n{BOLD}{GREEN}✓ Configuration saved!{RESET}\n")
+
+    # Show preview
+    utf8_print(f"{BOLD}Preview:{RESET}")
+    demo_usage = {
+        "five_hour": {"utilization": 42, "resets_at": None},
+        "seven_day": {"utilization": 67, "resets_at": None},
+    }
+    line = build_status_line(demo_usage, "Test Plan", config, stdin_ctx={"model_name": "Opus 4.6"}, user="You")
+    utf8_print(line)
+    utf8_print(f"\n{DIM}Restart Claude Code to apply changes.{RESET}\n")
+
+
 def cmd_heatmap():
     """Display the activity heatmap."""
     config = load_config()
@@ -1659,7 +1984,7 @@ def cmd_heatmap():
     utf8_print("")
 
 
-def build_status_line(usage, plan, config=None, stdin_ctx=None):
+def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
     if config is None:
         config = load_config()
 
@@ -1671,13 +1996,11 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None):
     # 1. Theme is "rainbow", OR
     # 2. animate is on (rainbow animation overlay on any theme)
     use_rainbow = is_rainbow_theme or animate
+    bar_plain = use_rainbow
 
-    if use_rainbow:
-        bar_plain = True
-        theme = get_theme_colours(theme_name) if not is_rainbow_theme else THEMES["default"]
-    else:
-        bar_plain = False
-        theme = get_theme_colours(theme_name)
+    # Single theme lookup: use default for rainbow (plain will colorize),
+    # otherwise use the configured theme
+    theme = THEMES["default"] if is_rainbow_theme else get_theme_colours(theme_name)
 
     show = config.get("show", DEFAULT_SHOW)
     bar_size = config.get("bar_size", DEFAULT_BAR_SIZE)
@@ -1767,10 +2090,9 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None):
                 wt_fmt = config.get("weekly_timer_format", DEFAULT_WEEKLY_TIMER_FORMAT)
                 if wt_fmt not in WEEKLY_TIMER_FORMATS:
                     wt_fmt = DEFAULT_WEEKLY_TIMER_FORMAT
-                wt_prefix = _sanitize(str(config.get("weekly_timer_prefix", DEFAULT_WEEKLY_TIMER_PREFIX)))[:10]
                 wr = format_weekly_reset(seven.get("resets_at"), fmt=wt_fmt)
                 if wr:
-                    weekly_reset_str = f" {wt_prefix}{wr}"
+                    weekly_reset_str = f" | {wr}"
             if layout == "compact":
                 parts.append(f"W {bar} {pct:.0f}%{weekly_reset_str}")
             elif layout == "minimal":
@@ -1865,23 +2187,71 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None):
         except Exception:
             pass
 
-    # Model name from stdin context
+    # Model name from stdin context (colored blue)
     if stdin_ctx and show.get("model", True):
         model = stdin_ctx.get("model_name")
         if model:
-            parts.append(model)
+            parts.append(f"{BLUE_MODEL}{model}{RESET}")
 
-    line = " | ".join(parts)
+    # User name from parameter (colored purple)
+    if user and show.get("user", False):
+        parts.append(f"{PURPLE_USER}{user}{RESET}")
 
-    # Animation: on = rainbow always moving, off = static theme colours
-    if use_rainbow:
-        line = rainbow_colorize(line, color_all=False, shimmer=animate)
+    # Multi-line mode: split into usage metrics (line 1) and context info (line 2)
+    multiline = config.get("multiline", False)
+    if multiline:
+        # Line 1: Session, Weekly, Extra (usage metrics)
+        # Count how many usage parts we have
+        usage_count = 0
+        if show.get("session", True) and usage.get("five_hour"):
+            usage_count += 1
+        if show.get("weekly", True) and usage.get("seven_day"):
+            usage_count += 1
+        # Check if Extra is in parts (harder to count, so check actual parts)
+        extra = usage.get("extra_usage")
+        extra_enabled_by_user = show.get("extra", False)
+        extra_explicitly_hidden = config.get("extra_hidden", False)
+        extra_has_credits = extra and extra.get("is_enabled") and (extra.get("monthly_limit") or 0) > 0
+        if extra_enabled_by_user or (extra_has_credits and not extra_explicitly_hidden):
+            usage_count += 1
+
+        # Split parts: first usage_count go to line1, rest to line2
+        parts1 = parts[:usage_count]
+        parts2 = parts[usage_count:]
+
+        line1 = " | ".join(parts1)
+        line2 = " | ".join(parts2)
+        # Add trailing pipe if user is shown on line2
+        if user and show.get("user", False):
+            line2 = line2 + " |"
+
+        # Apply coloring to each line separately
+        if use_rainbow:
+            line1 = rainbow_colorize(line1, color_all=False, shimmer=animate)
+            line2 = rainbow_colorize(line2, color_all=False, shimmer=animate)
+        else:
+            text_color_code = resolve_text_color(config)
+            if text_color_code:
+                line1 = apply_text_color(line1, text_color_code)
+                line2 = apply_text_color(line2, text_color_code)
+
+        return line1 + "\n" + line2 + "\n"
     else:
-        text_color_code = resolve_text_color(config)
-        if text_color_code:
-            line = apply_text_color(line, text_color_code)
+        # Single-line mode (original behavior)
+        line = " | ".join(parts)
+        # Add trailing pipe if user is shown
+        if user and show.get("user", False):
+            line = line + " |"
 
-    return line
+        # Animation: on = rainbow always moving, off = static theme colours
+        if use_rainbow:
+            line = rainbow_colorize(line, color_all=False, shimmer=animate)
+        else:
+            text_color_code = resolve_text_color(config)
+            if text_color_code:
+                line = apply_text_color(line, text_color_code)
+
+        return line + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -2053,11 +2423,7 @@ def cmd_set_theme(name):
     config = load_config()
     config["theme"] = name
     save_config(config)
-    # Clear the cache so the new theme takes effect immediately
-    try:
-        os.remove(get_cache_path())
-    except OSError:
-        pass
+    _clear_cache()
     if name == "rainbow":
         preview = rainbow_colorize(FILL * 8)
     else:
@@ -2140,6 +2506,9 @@ def cmd_print_config():
     anim = config.get("animate", False)
     anim_state = f"{GREEN}on{RESET}" if anim else f"{RED}off{RESET}"
     utf8_print(f"  Animation:    {anim_state}  ({'rainbow always moving' if anim else 'static'})")
+    ml = config.get("multiline", False)
+    ml_state = f"{GREEN}on{RESET}" if ml else f"{RED}off{RESET}"
+    utf8_print(f"  Multi-line:   {ml_state}  ({'usage on line 1, context on line 2' if ml else 'single-line'})")
     tc = config.get("text_color", "auto")
     if tc == "auto":
         resolved = THEME_TEXT_DEFAULTS.get(theme_name, "white")
@@ -2295,10 +2664,7 @@ def main():
             config = load_config()
             config["text_color"] = val
             save_config(config)
-            try:
-                os.remove(get_cache_path())
-            except OSError:
-                pass
+            _clear_cache()
             if val == "auto":
                 resolved = THEME_TEXT_DEFAULTS.get(config.get("theme", "default"), "white")
                 utf8_print(f"Text colour: {BOLD}auto{RESET} (using {resolved} for {config.get('theme', 'default')} theme)")
@@ -2324,16 +2690,36 @@ def main():
             config = load_config()
             config["animate"] = anim
             save_config(config)
-            try:
-                os.remove(get_cache_path())
-            except OSError:
-                pass
+            _clear_cache()
             if anim:
                 utf8_print(f"Animation: {GREEN}on{RESET}  (rainbow always moving)")
             else:
                 utf8_print(f"Animation: {RED}off{RESET}  (static)")
         else:
             utf8_print("Usage: --animate on|off")
+        return
+
+    if "--multiline" in args:
+        idx = args.index("--multiline")
+        if idx + 1 < len(args):
+            val = args[idx + 1].lower()
+            if val in ("on", "true", "yes", "1"):
+                multiline = True
+            elif val in ("off", "false", "no", "0"):
+                multiline = False
+            else:
+                utf8_print(f"Unknown value: {_sanitize(val)}  (use on or off)")
+                return
+            config = load_config()
+            config["multiline"] = multiline
+            save_config(config)
+            _clear_cache()
+            if multiline:
+                utf8_print(f"Multi-line: {GREEN}on{RESET}  (usage on line 1, context on line 2)")
+            else:
+                utf8_print(f"Multi-line: {RED}off{RESET}  (single-line mode)")
+        else:
+            utf8_print("Usage: --multiline on|off")
         return
 
     if "--bar-size" in args:
@@ -2347,10 +2733,7 @@ def main():
             config = load_config()
             config["bar_size"] = val
             save_config(config)
-            try:
-                os.remove(get_cache_path())
-            except OSError:
-                pass
+            _clear_cache()
             bw = BAR_SIZES[val]
             demo_bar = f"{GREEN}{FILL * bw}{RESET}"
             utf8_print(f"Bar size: {BOLD}{val}{RESET} ({bw} chars)  {demo_bar}")
@@ -2372,10 +2755,7 @@ def main():
             config = load_config()
             config["bar_style"] = val
             save_config(config)
-            try:
-                os.remove(get_cache_path())
-            except OSError:
-                pass
+            _clear_cache()
             fill_ch, empty_ch = BAR_STYLES[val]
             demo = f"{GREEN}{fill_ch * 4}{DIM}{empty_ch * 4}{RESET}"
             utf8_print(f"Bar style: {BOLD}{val}{RESET}  {demo}")
@@ -2396,10 +2776,7 @@ def main():
             config = load_config()
             config["extra_display"] = val
             save_config(config)
-            try:
-                os.remove(get_cache_path())
-            except OSError:
-                pass
+            _clear_cache()
             descriptions = {
                 "auto": "auto-detects (amount only if no spending limit, full bar otherwise)",
                 "full": "progress bar with amount and limit",
@@ -2423,10 +2800,7 @@ def main():
             config = load_config()
             config["context_format"] = val
             save_config(config)
-            try:
-                os.remove(get_cache_path())
-            except OSError:
-                pass
+            _clear_cache()
             utf8_print(f"Context format: {BOLD}{val}{RESET}")
             if val == "tokens":
                 utf8_print(f"{DIM}  Note: Claude Code uses a 200k context window.")
@@ -2446,10 +2820,7 @@ def main():
             config = load_config()
             config["layout"] = val
             save_config(config)
-            try:
-                os.remove(get_cache_path())
-            except OSError:
-                pass
+            _clear_cache()
             utf8_print(f"Layout: {BOLD}{val}{RESET}")
         else:
             utf8_print(f"Usage: --layout <name>")
@@ -2463,10 +2834,7 @@ def main():
             config = load_config()
             config["currency"] = val
             save_config(config)
-            try:
-                os.remove(get_cache_path())
-            except OSError:
-                pass
+            _clear_cache()
             utf8_print(f"Currency symbol: {BOLD}{val}{RESET}")
         else:
             utf8_print("Usage: --currency <symbol>  (e.g. \u00a3, $, \u20ac, \u00a5)")
@@ -2483,10 +2851,7 @@ def main():
             config = load_config()
             config["weekly_timer_format"] = val
             save_config(config)
-            try:
-                os.remove(get_cache_path())
-            except OSError:
-                pass
+            _clear_cache()
             descriptions = {
                 "auto": "date when >24h, countdown when <24h",
                 "countdown": "always show countdown (2d 5h / 14h 22m)",
@@ -2509,10 +2874,7 @@ def main():
             config = load_config()
             config["weekly_timer_prefix"] = val
             save_config(config)
-            try:
-                os.remove(get_cache_path())
-            except OSError:
-                pass
+            _clear_cache()
             if val:
                 utf8_print(f"Weekly timer prefix: {BOLD}{val}{RESET}")
             else:
@@ -2561,12 +2923,43 @@ def main():
             utf8_print(f"Parsed context: {json.dumps(ctx, indent=2)}")
         return
 
+    if "--interactive-setup" in args or "-i" in args:
+        cmd_interactive_setup()
+        return
+
+    if "--analytics" in args:
+        cmd_analytics()
+        return
+
     if "--heatmap" in args:
         cmd_heatmap()
         return
 
     if "--config" in args:
         cmd_print_config()
+        return
+
+    if "--mock-data" in args:
+        idx = args.index("--mock-data")
+        if idx + 1 < len(args):
+            try:
+                usage_pct = float(args[idx + 1])
+                if not 0 <= usage_pct <= 100:
+                    utf8_print("Error: usage percentage must be 0-100")
+                    return
+                mock_data = {
+                    "five_hour": {"utilization": usage_pct, "resets_at": None},
+                    "seven_day": {"utilization": min(usage_pct + 10, 100), "resets_at": None},
+                    "extra_usage": {"is_enabled": False, "utilization": 0},
+                }
+                config = load_config()
+                line = build_status_line(mock_data, "Test Plan", config, stdin_ctx={}, user="Test")
+                utf8_print(f"Mock status (session: {usage_pct:.0f}%, weekly: {min(usage_pct + 10, 100):.0f}%):\n")
+                utf8_print(line)
+            except (ValueError, IndexError):
+                utf8_print("Usage: --mock-data <0-100>  (simulates session usage percentage)")
+        else:
+            utf8_print("Usage: --mock-data <0-100>  (simulates session usage percentage)")
         return
 
     # Normal status line mode
@@ -2586,12 +2979,10 @@ def main():
             raw_stdin = sys.stdin.read(65536)
         except Exception:
             pass
-    stdin_ctx = _parse_stdin_context(raw_stdin)
 
     # Persist stdin context (model, context %) in a separate file so it
     # survives across refreshes that don't receive stdin data from Claude Code.
-    # Merge new data into persisted data so partial updates (e.g. model but
-    # no context_pct during thinking) don't wipe previously known fields.
+    # Only parse stdin if new data received (avoid redundant parsing).
     _STDIN_CTX_KEYS = {"model_name", "context_pct", "context_used", "context_limit", "cost_usd"}
     stdin_ctx_path = get_state_dir() / "stdin_ctx.json"
     persisted = {}
@@ -2601,12 +2992,16 @@ def main():
             persisted = {k: _sanitize(str(v)) if isinstance(v, str) else v for k, v in raw_persisted.items() if k in _STDIN_CTX_KEYS}
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
-    if stdin_ctx:
-        persisted.update(stdin_ctx)
-        try:
-            _atomic_json_write(stdin_ctx_path, persisted, indent=None)
-        except OSError:
-            pass
+
+    # Only parse stdin if new data received (avoid redundant parsing)
+    if raw_stdin and raw_stdin.strip():
+        stdin_ctx = _parse_stdin_context(raw_stdin)
+        if stdin_ctx:
+            persisted.update(stdin_ctx)
+            try:
+                _atomic_json_write(stdin_ctx_path, persisted, indent=None)
+            except OSError:
+                pass
     stdin_ctx = persisted
 
     cache_path = get_cache_path()
@@ -2614,15 +3009,15 @@ def main():
 
     if cached is not None:
         if "usage" in cached:
-            line = build_status_line(cached["usage"], cached.get("plan", ""), config, stdin_ctx)
+            line = build_status_line(cached["usage"], cached.get("plan", ""), config, stdin_ctx, user=cached.get("user"))
         else:
             line = cached.get("line", "")
         line = append_update_indicator(line, config)
         line = append_claude_update_indicator(line, config)
-        sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
+        sys.stdout.buffer.write((line + RESET + "\n\n").encode("utf-8"))
         return
 
-    token, plan = get_credentials()
+    token, plan, user = get_credentials()
     if not token:
         if os.environ.get("ANTHROPIC_API_KEY"):
             line = "API key detected \u2014 claude-pulse requires a Pro/Max subscription"
@@ -2632,9 +3027,13 @@ def main():
         sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
         return
 
+    # If user is not in credentials but needed, try to fetch from API
+    if not user and config.get("show", {}).get("user", False):
+        user = fetch_user_info(token)
+
     try:
         usage = fetch_usage(token)
-        line = build_status_line(usage, plan, config, stdin_ctx)
+        line = build_status_line(usage, plan, config, stdin_ctx, user=user)
     except urllib.error.HTTPError as e:
         usage = None
         if e.code == 401:
@@ -2643,7 +3042,7 @@ def main():
             if new_token:
                 try:
                     usage = fetch_usage(new_token)
-                    line = build_status_line(usage, plan, config, stdin_ctx)
+                    line = build_status_line(usage, plan, config, stdin_ctx, user=user)
                 except Exception:
                     usage = None
                     line = "Token refresh failed \u2014 restart Claude to re-login"
@@ -2667,9 +3066,15 @@ def main():
         line = f"Usage unavailable: {type(e).__name__}"
 
     if usage is not None:
-        write_cache(cache_path, line, usage, plan)
+        write_cache(cache_path, line, usage, plan, user)
         _append_history(usage)
         _update_heatmap(usage)
+        # Record hourly analytics sample
+        try:
+            usage_pct = usage.get("five_hour", {}).get("utilization", 0)
+            record_hourly_sample(usage_pct)
+        except Exception:
+            pass
         try:
             stats, milestone = _update_stats()
             if milestone:
@@ -2678,7 +3083,7 @@ def main():
             pass
     line = append_update_indicator(line, config)
     line = append_claude_update_indicator(line, config)
-    sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
+    sys.stdout.buffer.write((line + RESET + "\n\n").encode("utf-8"))
 
 
 if __name__ == "__main__":

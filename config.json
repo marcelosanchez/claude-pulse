@@ -1,12 +1,18 @@
 {
   "cache_ttl_seconds": 60,
-  "theme": "default",
+  "theme": "dark",
   "rainbow_bars": true,
   "show": {
     "session": true,
     "weekly": true,
-    "plan": true,
+    "plan": false,
     "timer": true,
-    "extra": false
+    "extra": false,
+    "user": true,
+    "model": true,
+    "context": true,
+    "update": true,
+    "claude_update": true,
+    "weekly_timer": true
   }
 }

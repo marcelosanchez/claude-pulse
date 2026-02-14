@@ -41,6 +41,7 @@
 - **Time remaining** — countdown until your session resets
 - **Weekly usage** — your 7-day rolling usage across all models
 - **Context window** — how full Claude's memory/context is (with colour-coded bar)
+- **Username** — your first name (optional, disabled by default — enable with `/pulse show user`)
 - **Model name** — which model is active (Opus 4.6, Sonnet 4.5, etc.)
 - **Plan tier** — auto-detected (Pro, Max 5x, Max 20x)
 - **Extra credits** — auto-shows when you have credits enabled in https://claude.ai/settings/usage
@@ -201,7 +202,30 @@ python claude_status.py --show timer,plan
 python claude_status.py --config
 ```
 
-**Available parts:** `session`, `weekly`, `weekly_timer`, `plan`, `timer`, `extra`, `update`, `claude_update`, `sparkline`, `runway`, `status_message`, `streak`, `model`, `context`
+**Available parts:** `session`, `weekly`, `weekly_timer`, `plan`, `timer`, `extra`, `update`, `claude_update`, `sparkline`, `runway`, `status_message`, `streak`, `user`, `model`, `context`
+
+### Username Display
+
+Show your first name on the status bar:
+
+```bash
+python claude_status.py --show user           # Enable username
+python claude_status.py --hide user           # Disable username
+```
+
+Or from Claude Code:
+```
+/pulse show user
+/pulse hide user
+```
+
+The username comes from your OAuth profile — only the first name is displayed (e.g., "John Doe" → "John"). It's disabled by default. When enabled, it appears before the model name:
+
+```
+Session ━━━━━━━━ 12% 3h 40m | Weekly ━━━━━━━━ 12% | John | Opus 4.6
+```
+
+If your name isn't available in the credentials, claude-pulse will fetch it from Anthropic's API (cached with your usage data).
 
 ### `/pulse` Slash Command
 
@@ -212,6 +236,8 @@ All the CLI flags below also work as `/pulse` subcommands inside Claude Code:
 /pulse hide timer       — hide the reset timer
 /pulse show extra       — show extra credits on the status line
 /pulse hide extra       — hide extra credits
+/pulse show user        — show your username (first name only)
+/pulse hide user        — hide your username
 /pulse currency £       — set your currency symbol
 /pulse animate on       — enable rainbow animation on any theme
 /pulse animate off      — disable animation (static colours)
