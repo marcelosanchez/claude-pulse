@@ -1182,6 +1182,8 @@ def format_reset_time(resets_at_str):
 
 WEEKLY_TIMER_FORMATS = ("auto", "countdown", "date", "full")
 DEFAULT_WEEKLY_TIMER_FORMAT = "auto"
+CLOCK_FORMATS = ("12h", "24h")
+DEFAULT_CLOCK_FORMAT = "12h"
 DEFAULT_WEEKLY_TIMER_PREFIX = "R:"
 
 
@@ -1198,11 +1200,13 @@ def _weekly_countdown(total_seconds):
     return f"{minutes}m"
 
 
-def _weekly_date(resets_at):
-    """Format reset time as local day+hour: 'Sat 5pm'."""
+def _weekly_date(resets_at, clock="12h"):
+    """Format reset time as local day+hour: 'Sat 5pm' or 'Sat 17:00'."""
     local_dt = resets_at.astimezone()
     hour = local_dt.hour
-    if hour == 0:
+    if clock == "24h":
+        time_str = f"{hour:02d}:{local_dt.minute:02d}"
+    elif hour == 0:
         time_str = "12am"
     elif hour < 12:
         time_str = f"{hour}am"
@@ -1213,14 +1217,16 @@ def _weekly_date(resets_at):
     return f"{local_dt.strftime('%a')} {time_str}"
 
 
-def format_weekly_reset(resets_at_str, fmt="auto"):
+def format_weekly_reset(resets_at_str, fmt="auto", clock="12h"):
     """Format weekly reset time.
 
     Formats:
       auto      — date when >24h, countdown when <24h (default)
       countdown — always show countdown: '2d 5h' / '14h 22m' / '45m'
-      date      — always show date: 'Sat 5pm'
+      date      — always show date: 'Sat 5pm' (or 'Sat 17:00' with clock='24h')
       full      — both: 'Sat 5pm · 2d 5h'
+
+    clock: '12h' for am/pm display, '24h' for 24-hour display.
     """
     if not resets_at_str:
         return None
@@ -1234,13 +1240,13 @@ def format_weekly_reset(resets_at_str, fmt="auto"):
         if fmt == "countdown":
             return _weekly_countdown(total_seconds)
         if fmt == "date":
-            return _weekly_date(resets_at)
+            return _weekly_date(resets_at, clock=clock)
         if fmt == "full":
-            return f"{_weekly_date(resets_at)} \u00b7 {_weekly_countdown(total_seconds)}"
+            return f"{_weekly_date(resets_at, clock=clock)} \u00b7 {_weekly_countdown(total_seconds)}"
         # auto: date when >24h, countdown when <24h
         if total_seconds < 86400:
             return _weekly_countdown(total_seconds)
-        return _weekly_date(resets_at)
+        return _weekly_date(resets_at, clock=clock)
     except (ValueError, TypeError):
         return None
 
@@ -1863,7 +1869,10 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None):
                 if wt_fmt not in WEEKLY_TIMER_FORMATS:
                     wt_fmt = DEFAULT_WEEKLY_TIMER_FORMAT
                 wt_prefix = _sanitize(str(config.get("weekly_timer_prefix", DEFAULT_WEEKLY_TIMER_PREFIX)))[:10]
-                wr = format_weekly_reset(seven.get("resets_at"), fmt=wt_fmt)
+                wt_clock = config.get("clock_format", DEFAULT_CLOCK_FORMAT)
+                if wt_clock not in CLOCK_FORMATS:
+                    wt_clock = DEFAULT_CLOCK_FORMAT
+                wr = format_weekly_reset(seven.get("resets_at"), fmt=wt_fmt, clock=wt_clock)
                 if wr:
                     weekly_reset_str = f" {wt_prefix}{wr}"
             if layout == "compact":
@@ -2300,7 +2309,10 @@ def cmd_print_config():
     wt_pfx = _sanitize(str(config.get("weekly_timer_prefix", DEFAULT_WEEKLY_TIMER_PREFIX)))[:10]
     wt_vis = show.get("weekly_timer", True)
     wt_state = f"{GREEN}on{RESET}" if wt_vis else f"{RED}off{RESET}"
-    utf8_print(f"  Weekly timer:  {wt_state}  format={wt_fmt}  prefix=\"{wt_pfx}\"")
+    wt_clk = config.get("clock_format", DEFAULT_CLOCK_FORMAT)
+    if wt_clk not in CLOCK_FORMATS:
+        wt_clk = DEFAULT_CLOCK_FORMAT
+    utf8_print(f"  Weekly timer:  {wt_state}  format={wt_fmt}  prefix=\"{wt_pfx}\"  clock={wt_clk}")
     anim = config.get("animate", False)
     anim_state = f"{GREEN}on{RESET}" if anim else f"{RED}off{RESET}"
     utf8_print(f"  Animation:    {anim_state}  ({'rainbow always moving' if anim else 'static'})")
@@ -2716,6 +2728,32 @@ def main():
                 utf8_print(f"Weekly timer prefix: {DIM}(none){RESET}")
         else:
             utf8_print('Usage: --weekly-timer-prefix <text>  (e.g. "R:", "Resets:", "")')
+        return
+
+    if "--clock-format" in args:
+        idx = args.index("--clock-format")
+        if idx + 1 < len(args):
+            val = args[idx + 1].lower()
+            if val not in CLOCK_FORMATS:
+                utf8_print(f"Unknown clock format: {_sanitize(val)}")
+                utf8_print(f"Available: {', '.join(CLOCK_FORMATS)}")
+                return
+            config = load_config()
+            config["clock_format"] = val
+            save_config(config)
+            try:
+                os.remove(get_cache_path())
+            except OSError:
+                pass
+            descriptions = {
+                "12h": "12-hour with am/pm (Fri 5pm)",
+                "24h": "24-hour (Fri 17:00)",
+            }
+            utf8_print(f"Clock format: {BOLD}{val}{RESET}  ({descriptions[val]})")
+        else:
+            utf8_print("Usage: --clock-format <mode>\n")
+            utf8_print("  12h  12-hour with am/pm: Fri 5pm (default)")
+            utf8_print("  24h  24-hour: Fri 17:00")
         return
 
     if "--stats" in args:
