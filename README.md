@@ -138,7 +138,7 @@ python claude_status.py --theme ocean
 
 ### Configurable Bar Size
 
-Choose how wide the progress bars appear — from small (4 chars) to large (12 chars), with medium (8 chars) as default:
+Choose how wide the progress bars appear — from small (4 chars) to large (12 chars), with large (12 chars) as default:
 
 ```bash
 python claude_status.py --bar-size small          # ━━━━
@@ -378,7 +378,7 @@ Edit `config.json` directly or use the CLI flags:
   "animate": false,
   "text_color": "auto",
   "currency": "£",
-  "bar_size": "medium",
+  "bar_size": "large",
   "bar_style": "classic",
   "layout": "standard",
   "context_format": "percent",

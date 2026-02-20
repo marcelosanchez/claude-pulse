@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal Claude Code status line — fetches real usage data from Anthropic's OAuth API."""
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 
 import json
 import os
@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 DEFAULT_CACHE_TTL = 60
 BAR_SIZES = {"small": 4, "small-medium": 6, "medium": 8, "medium-large": 10, "large": 12}
-DEFAULT_BAR_SIZE = "medium"
+DEFAULT_BAR_SIZE = "large"
 DEFAULT_MAX_WIDTH_PCT = 80  # percentage of terminal width to use
 FILL = "\u2501"   # ━ (thin horizontal bar)
 EMPTY = "\u2500"   # ─ (thin line)
@@ -2072,6 +2072,8 @@ def _get_python_cmd():
     On Linux this is typically 'python3', on Windows 'python'.
     """
     exe = sys.executable
+    if sys.platform == "win32":
+        exe = exe.replace("\\", "/")
     # If the executable path contains spaces, quote it
     if " " in exe:
         return f'"{exe}"'
@@ -2081,6 +2083,8 @@ def _get_python_cmd():
 def install_status_line():
     settings_path = Path.home() / ".claude" / "settings.json"
     script_path = Path(__file__).resolve()
+    if sys.platform == "win32":
+        script_path = str(script_path).replace("\\", "/")
     python_cmd = _get_python_cmd()
 
     settings = {}

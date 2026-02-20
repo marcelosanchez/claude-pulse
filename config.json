@@ -1,11 +1,23 @@
 {
   "cache_ttl_seconds": 60,
   "theme": "default",
+  "text_color": "auto",
+  "bar_size": "large",
+  "bar_style": "classic",
+  "layout": "standard",
+  "max_width": 80,
+  "context_format": "percent",
+  "weekly_timer_format": "auto",
+  "clock_format": "12h",
+  "extra_display": "auto",
+  "currency": "\u00a3",
   "show": {
     "session": true,
     "weekly": true,
-    "plan": false,
+    "plan": true,
     "timer": true,
-    "extra": false
+    "extra": false,
+    "model": true,
+    "context": true
   }
 }
