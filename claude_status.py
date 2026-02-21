@@ -2065,15 +2065,30 @@ def _truncate_line(line, config):
 # Install
 # ---------------------------------------------------------------------------
 
+def _win_portable_path(path_str):
+    """Convert a Windows absolute path to use $HOME where possible.
+
+    Claude Code v2.1.47+ invokes statusLine commands via a shell that
+    does not expand backslash paths correctly on Windows.  Using forward
+    slashes and ``$HOME`` instead of the literal home directory avoids
+    the issue.  See: https://github.com/anthropics/claude-code/issues/27057
+    """
+    if sys.platform != "win32":
+        return path_str
+    path_str = str(path_str).replace("\\", "/")
+    home = str(Path.home()).replace("\\", "/")
+    if path_str.startswith(home + "/") or path_str == home:
+        path_str = "$HOME" + path_str[len(home):]
+    return path_str
+
+
 def _get_python_cmd():
     """Return the Python command to use in hooks/settings.
 
     Uses sys.executable to ensure we match whatever Python is running this script.
     On Linux this is typically 'python3', on Windows 'python'.
     """
-    exe = sys.executable
-    if sys.platform == "win32":
-        exe = exe.replace("\\", "/")
+    exe = _win_portable_path(sys.executable)
     # If the executable path contains spaces, quote it
     if " " in exe:
         return f'"{exe}"'
@@ -2082,9 +2097,7 @@ def _get_python_cmd():
 
 def install_status_line():
     settings_path = Path.home() / ".claude" / "settings.json"
-    script_path = Path(__file__).resolve()
-    if sys.platform == "win32":
-        script_path = str(script_path).replace("\\", "/")
+    script_path = _win_portable_path(Path(__file__).resolve())
     python_cmd = _get_python_cmd()
 
     settings = {}
@@ -2095,7 +2108,7 @@ def install_status_line():
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Status line command
+    # Status line command — use $HOME on Windows for Claude Code compat
     settings["statusLine"] = {
         "type": "command",
         "command": f'{python_cmd} "{script_path}"',

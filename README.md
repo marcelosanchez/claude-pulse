@@ -457,6 +457,7 @@ No API key required — claude-pulse uses your existing Claude Code login (OAuth
 | Problem | Solution |
 |---------|----------|
 | Status line doesn't appear | Run `python claude_status.py --install` and restart Claude Code |
+| Status line missing on Windows (v2.1.47+) | Re-run `python claude_status.py --install` — recent Claude Code versions require `$HOME` and forward slashes in paths. The installer now handles this automatically. See [#27057](https://github.com/anthropics/claude-code/issues/27057) |
 | Shows "No credentials found" | Make sure you're logged in to Claude Code (`claude /login`) |
 | Shows wrong plan tier after upgrading | Log out (`claude /logout`) then log back in (`claude /login`) — your OAuth token needs to refresh to pick up the new subscription tier |
 | Stale percentages | Delete the cache: `~/.cache/claude-status/cache.json` (Linux/Mac) or `%LOCALAPPDATA%\claude-status\cache.json` (Windows) |
