@@ -2239,10 +2239,19 @@ def cmd_show_all():
 
 
 def cmd_set_theme(name):
-    """Set the active theme and save to config."""
+    """Set the active theme and save to config.
+
+    Special case: ``--theme default`` applies the full factory-reset preset
+    so that bar size, text colour, animation, etc. all return to defaults —
+    not just the colour palette.
+    """
     if name not in THEMES:
         utf8_print(f"Unknown theme: {_sanitize(name)}")
         utf8_print(f"Available: {', '.join(THEMES.keys())}")
+        return
+    # "default" means full factory reset, not just the colour palette
+    if name == "default" and "default" in PRESETS:
+        cmd_preset("default")
         return
     config = load_config()
     config["theme"] = name
@@ -2312,6 +2321,9 @@ def cmd_preset(name):
     # Apply show/hide overrides — respect user preferences for update notifications
     for key, val in preset["show_overrides"].items():
         config["show"][key] = val
+    # Full reset should also clear sticky flags
+    if name == "default":
+        config.pop("extra_hidden", None)
     save_config(config)
     try:
         os.remove(get_cache_path())
