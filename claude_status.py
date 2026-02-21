@@ -1828,15 +1828,18 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None):
         if not (isinstance(max_width_pct, int) and 20 <= max_width_pct <= 100):
             max_width_pct = DEFAULT_MAX_WIDTH_PCT
         effective_width = (term_width * max_width_pct) // 100
-        # Count how many bar sections we'll render
+        # Count ALL bar sections that will be rendered (session, weekly,
+        # extra, context) so the width budget is split correctly.
         num_bars = sum(1 for k in ("session", "weekly") if show.get(k, True))
         extra = usage.get("extra_usage")
         if extra and extra.get("is_enabled") and not config.get("extra_hidden", False):
             num_bars += 1
-        # Each bar section ≈ bw + 25 chars of labels/percentage/timer
-        # Separators: " | " = 3 chars each
-        # Plan + update indicators + model ≈ 40 chars
-        overhead = num_bars * 25 + max(num_bars - 1, 0) * 3 + 40
+        if stdin_ctx and show.get("context", True):
+            num_bars += 1
+        # Per-bar overhead: label + space + space + pct + timer ≈ 18 chars
+        # Separators between sections: " | " = 3 chars each
+        # Trailing fixed items (model name, update/plan indicators) ≈ 15 chars
+        overhead = num_bars * 18 + max(num_bars - 1, 0) * 3 + 15
         max_bar_width = max(2, (effective_width - overhead) // max(num_bars, 1))
         if bw > max_bar_width:
             bw = max_bar_width
