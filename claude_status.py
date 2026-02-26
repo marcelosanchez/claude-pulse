@@ -135,6 +135,115 @@ MODEL_CONTEXT_WINDOWS = {
 }
 DEFAULT_CONTEXT_WINDOW = 200_000
 
+_cached_terminal_width = None
+
+def _detect_terminal_width():
+    """Detect the real terminal width, even when stdout is piped.
+
+    Tries progressively heavier approaches, returning the first success:
+      1. os.get_terminal_size(stdout)  — direct TTY
+      2. os.get_terminal_size(stderr)  — works when only stdout is piped
+      3. os.get_terminal_size(stdin)   — same
+      4. /dev/tty via os.get_terminal_size — POSIX controlling terminal
+      5. COLUMNS env var               — honours explicit overrides
+      6. /proc walk (Linux only)        — last resort; walks parent pids
+         to find an ancestor with a terminal fd
+
+    Returns the column count (int), or None if undetectable.
+    The result is cached for the lifetime of the process (a single
+    status-line render), avoiding repeated /proc I/O.
+    """
+    global _cached_terminal_width
+    if _cached_terminal_width is not None:
+        return _cached_terminal_width if _cached_terminal_width > 0 else None
+
+    cols = _detect_terminal_width_uncached()
+    _cached_terminal_width = cols if cols is not None else -1
+    return cols
+
+
+def _detect_terminal_width_uncached():
+    """Internal: attempt each detection method in order."""
+    # 1-3. Try each standard fd — stderr/stdin may still be a TTY
+    for fd in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            return os.get_terminal_size(fd.fileno()).columns
+        except (OSError, ValueError, AttributeError):
+            pass
+    # 4. POSIX controlling terminal — works on Linux + macOS even with piped stdio
+    try:
+        tty_fd = os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY)
+        try:
+            return os.get_terminal_size(tty_fd).columns
+        finally:
+            os.close(tty_fd)
+    except OSError:
+        pass
+    # 5. Explicit COLUMNS environment variable
+    try:
+        cols = int(os.environ["COLUMNS"])
+        if cols > 0:
+            return cols
+    except (KeyError, ValueError):
+        pass
+    # 6. Linux /proc walk — last resort (see _detect_width_from_proc)
+    return _detect_width_from_proc()
+
+
+def _detect_width_from_proc():
+    """Query terminal width by walking the Linux process tree via /proc.
+
+    When all standard detection methods fail (common inside Claude Code where
+    stdout/stderr/stdin are all pipes and /dev/tty is unavailable), this walks
+    up the parent process chain looking for an ancestor that holds an open
+    file descriptor to a PTY.  It then queries TIOCGWINSZ on that fd to get
+    the real terminal dimensions.
+
+    Linux-only (/proc is not available on macOS/Windows).  Returns None on
+    non-Linux platforms or if no terminal fd is found.  All filesystem and
+    ioctl operations are individually caught so a failure at any point
+    (permissions, process exit, container restrictions) is silently skipped.
+
+    This function is self-contained — it can be removed without affecting
+    the rest of the detection cascade, which will fall back to shutil.
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        import fcntl, termios, struct  # Linux-only modules
+        pid = os.getpid()
+        for _ in range(10):
+            with open(f"/proc/{pid}/stat") as f:
+                raw = f.read()
+            # Parse ppid safely: comm field "(name)" can contain spaces
+            # and parens, so find the *last* ')' before splitting.
+            ppid = int(raw[raw.rfind(")") + 2:].split()[1])
+            if ppid <= 1:
+                break
+            fd_dir = f"/proc/{ppid}/fd"
+            try:
+                for fd_name in os.listdir(fd_dir):
+                    try:
+                        target = os.readlink(f"{fd_dir}/{fd_name}")
+                        if "/pts/" not in target and "/tty" not in target:
+                            continue
+                        fd = os.open(f"{fd_dir}/{fd_name}", os.O_RDONLY)
+                        try:
+                            buf = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\x00" * 8)
+                            cols = struct.unpack("HHHH", buf)[1]
+                            if cols > 0:
+                                return cols
+                        finally:
+                            os.close(fd)
+                    except (OSError, PermissionError):
+                        continue
+            except (OSError, PermissionError):
+                pass
+            pid = ppid
+    except (OSError, ValueError):
+        pass
+    return None
+
 def _sanitize(text):
     """Strip ANSI/terminal escape sequences and control characters from untrusted strings."""
     # Strip CSI (\x1b[...), OSC (\x1b]...), DCS (\x1bP...) and other escape sequences
@@ -1822,10 +1931,13 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None):
     bstyle = config.get("bar_style", DEFAULT_BAR_STYLE)
     layout = config.get("layout", DEFAULT_LAYOUT)
 
-    # Terminal width clamping — use a percentage of terminal width (default 80%)
-    # to leave room for other Claude Code UI elements sharing the status line
+    # Terminal width clamping — shrink bars proportionally when the viewport
+    # is narrower than the full rendered line.  _detect_terminal_width tries
+    # real TTY, stderr/stdin fds, /dev/tty, COLUMNS env, then /proc on Linux.
+    # When all fail, fall back to shutil's conservative estimate so bars still
+    # shrink to keep all sections visible rather than being truncated.
     try:
-        term_width = shutil.get_terminal_size((120, 24)).columns
+        term_width = _detect_terminal_width() or shutil.get_terminal_size((120, 24)).columns
         max_width_pct = config.get("max_width", DEFAULT_MAX_WIDTH_PCT)
         if not (isinstance(max_width_pct, int) and 20 <= max_width_pct <= 100):
             max_width_pct = DEFAULT_MAX_WIDTH_PCT
@@ -1846,7 +1958,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None):
         if bw > max_bar_width:
             bw = max_bar_width
     except Exception:
-        pass  # if terminal size detection fails, use configured size
+        pass  # if width detection/clamping fails, use configured bar size
 
     parts = []
 
@@ -2068,7 +2180,7 @@ def _truncate_line(line, config):
     into Claude Code's side notification area or wraps to the next line.
     """
     try:
-        term_width = shutil.get_terminal_size((120, 24)).columns
+        term_width = _detect_terminal_width() or shutil.get_terminal_size((120, 24)).columns
         max_width_pct = config.get("max_width", DEFAULT_MAX_WIDTH_PCT)
         if not (isinstance(max_width_pct, int) and 20 <= max_width_pct <= 100):
             max_width_pct = DEFAULT_MAX_WIDTH_PCT
