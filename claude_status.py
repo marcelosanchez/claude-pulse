@@ -3112,10 +3112,9 @@ def main():
     cache_ttl = config.get("cache_ttl_seconds", DEFAULT_CACHE_TTL)
     animate = config.get("animate", False)
 
-    # Suppress output when Claude Code's status bar is filled by a notification
-    # (e.g. npm → native installer migration) that would cause wrapping
-    if _detect_status_bar_conflict():
-        return
+    # Note: _detect_status_bar_conflict() removed — it suppressed all output
+    # when leftover npm @anthropic-ai/claude-code files existed on disk,
+    # even after migrating to the native installer.
 
     # One-time cleanup of legacy hooks from pre-v2.2.0
     try:
