@@ -363,30 +363,52 @@ HISTORY_MAX_AGE = 86400  # 24 hours in seconds
 # Rainbow animation helpers
 # ---------------------------------------------------------------------------
 
-def hsv_to_rgb(h, s, v):
-    """Convert HSV (all 0-1) to RGB (0-255 ints)."""
-    if s == 0.0:
-        c = int(v * 255)
-        return c, c, c
-    h6 = h * 6.0
-    i = int(h6)
-    f = h6 - i
-    p = int(v * (1.0 - s) * 255)
-    q = int(v * (1.0 - s * f) * 255)
-    t = int(v * (1.0 - s * (1.0 - f)) * 255)
-    vi = int(v * 255)
-    i %= 6
-    if i == 0:
-        return vi, t, p
-    if i == 1:
-        return q, vi, p
-    if i == 2:
-        return p, vi, t
-    if i == 3:
-        return p, q, vi
-    if i == 4:
-        return t, p, vi
-    return vi, p, q
+# Ultrathink rainbow palette — matches Claude Code's ultrathink colors
+_ULTRATHINK_BASE = [
+    (235, 95, 87),   # red
+    (245, 139, 87),  # orange
+    (250, 195, 95),  # yellow
+    (145, 200, 130), # green
+    (130, 170, 220), # blue
+    (155, 130, 200), # indigo
+    (200, 130, 180), # violet
+]
+
+_ULTRATHINK_SHIMMER = [
+    (250, 155, 147), # red shimmer
+    (255, 185, 137), # orange shimmer
+    (255, 225, 155), # yellow shimmer
+    (185, 230, 180), # green shimmer
+    (180, 205, 240), # blue shimmer
+    (195, 180, 230), # indigo shimmer
+    (230, 180, 210), # violet shimmer
+]
+
+
+def _lerp_color(c1, c2, t):
+    """Linearly interpolate between two RGB tuples."""
+    return (
+        int(c1[0] + (c2[0] - c1[0]) * t),
+        int(c1[1] + (c2[1] - c1[1]) * t),
+        int(c1[2] + (c2[2] - c1[2]) * t),
+    )
+
+
+def _ultrathink_color(pos, shimmer_t=0.0):
+    """Map position (0.0-1.0) to an ultrathink rainbow color.
+
+    shimmer_t: 0.0 = base colors, 1.0 = full shimmer colors.
+    """
+    n = len(_ULTRATHINK_BASE)
+    scaled = pos * n
+    idx = int(scaled) % n
+    frac = scaled - int(scaled)
+    next_idx = (idx + 1) % n
+    base = _lerp_color(_ULTRATHINK_BASE[idx], _ULTRATHINK_BASE[next_idx], frac)
+    if shimmer_t > 0.0:
+        shimmer = _lerp_color(_ULTRATHINK_SHIMMER[idx], _ULTRATHINK_SHIMMER[next_idx], frac)
+        return _lerp_color(base, shimmer, shimmer_t)
+    return base
 
 
 def rainbow_colorize(text, color_all=True, shimmer=True):
@@ -443,10 +465,15 @@ def rainbow_colorize(text, color_all=True, shimmer=True):
             result.append(text[i])
         else:
             # Wider bands: 0.025 per char = full rainbow every ~40 chars
-            hue = ((visible_idx * 0.025) + hue_drift) % 1.0
+            pos = ((visible_idx * 0.025) + hue_drift) % 1.0
 
-            # Vivid rainbow: high saturation and brightness
-            r, g, b = hsv_to_rgb(hue, 0.92, 0.95)
+            # Ultrathink palette with shimmer pulse when animating
+            if shimmer:
+                # Triangle wave 0→1→0 over ~1.3s cycle for breathing effect
+                pulse = abs((now * 1.5) % 2.0 - 1.0)
+            else:
+                pulse = 0.0
+            r, g, b = _ultrathink_color(pos, pulse)
             result.append(f"\033[38;2;{r};{g};{b}m{text[i]}\033[0m")
 
         visible_idx += 1
