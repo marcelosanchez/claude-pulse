@@ -1081,6 +1081,18 @@ def read_cache(cache_path, ttl):
     return None
 
 
+def _read_stale_cache(cache_path):
+    """Return cached usage data regardless of age, or None if unavailable."""
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if "usage" in cached:
+            return cached
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, OSError):
+        pass
+    return None
+
+
 _USAGE_CACHE_KEYS = {"five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "extra_usage"}
 
 def write_cache(cache_path, line, usage=None, plan=None):
@@ -3126,6 +3138,16 @@ def main():
                 line = "Token expired \u2014 restart Claude to refresh"
         elif e.code == 403:
             line = "Access denied \u2014 check your subscription"
+        elif e.code == 429:
+            # Rate limited — fall back to stale cache if available
+            stale = _read_stale_cache(cache_path)
+            if stale:
+                stale_usage = stale.get("usage")
+                line = build_status_line(stale_usage, stale.get("plan", plan), config, stdin_ctx)
+                write_cache(cache_path, line, stale_usage, plan)
+            else:
+                line = "Rate limited \u2014 retrying next refresh"
+                write_cache(cache_path, line)
         else:
             line = f"API error: {e.code}"
     except urllib.error.URLError as e:
