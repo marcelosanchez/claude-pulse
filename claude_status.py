@@ -1098,12 +1098,17 @@ def cmd_update():
         utf8_print(f"  {RED}Update error: {type(e).__name__}{RESET}")
 
 
+_ERROR_CACHE_TTL = 10  # seconds — retry errors faster than normal data
+
+
 def read_cache(cache_path, ttl):
     """Return the full cache dict if fresh, else None."""
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             cached = json.load(f)
-        if time.time() - cached.get("timestamp", 0) < ttl:
+        # Error-only entries (no usage data) expire faster so we retry sooner
+        effective_ttl = ttl if "usage" in cached else _ERROR_CACHE_TTL
+        if time.time() - cached.get("timestamp", 0) < effective_ttl:
             return cached
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
         pass
