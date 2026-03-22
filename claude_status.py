@@ -5,6 +5,7 @@ VERSION = "2.2.0"
 
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -930,20 +931,28 @@ def cmd_update():
 def read_cache(cache_path, ttl):
     """Return the full cache dict if fresh, else None.
 
-    If cache has _fetch_failed=True, use aggressive retry (3s) instead of TTL.
-    This ensures real-time updates after network recovery.
+    Freshness rules (checked in order):
+    1. Rate-limited: if _rate_limit_until is in the future, serve stale data
+       to avoid hammering the API during backoff
+    2. Fetch-failed: if _fetch_failed=True and age < 3s, force retry
+    3. Normal TTL: if age < ttl, serve cached data
     """
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             cached = json.load(f)
         ts = cached.get("timestamp", 0)
-        failed = cached.get("_fetch_failed", False)
         age = time.time() - ts
 
-        # If previous fetch failed, retry aggressively every 3s
+        # Rate limit backoff — serve stale data during backoff period
+        rate_limit_until = cached.get("_rate_limit_until", 0)
+        if rate_limit_until and time.time() < rate_limit_until:
+            return cached
+
+        # If previous fetch failed (non-429), retry aggressively every 3s
+        failed = cached.get("_fetch_failed", False)
         if failed and age < 3:
-            return None  # Force immediate retry
-        # Otherwise use normal TTL
+            return None
+        # Normal TTL
         if age < ttl:
             return cached
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
@@ -953,8 +962,9 @@ def read_cache(cache_path, ttl):
 
 _USAGE_CACHE_KEYS = {"five_hour", "seven_day", "extra_usage"}
 
-def write_cache(cache_path, line, usage=None, plan=None, user=None, fetch_failed=False):
-    """Write cache with optional failure marker for intelligent retry."""
+def write_cache(cache_path, line, usage=None, plan=None, user=None,
+                fetch_failed=False, rate_limit_until=0, fail_count=0):
+    """Write cache with optional failure/rate-limit markers for intelligent retry."""
     try:
         data = {"timestamp": time.time(), "line": line}
         if usage is not None:
@@ -965,10 +975,22 @@ def write_cache(cache_path, line, usage=None, plan=None, user=None, fetch_failed
             data["user"] = user
         if fetch_failed:
             data["_fetch_failed"] = True
+        if rate_limit_until > 0:
+            data["_rate_limit_until"] = rate_limit_until
+            data["_fail_count"] = fail_count
         with _secure_open_write(cache_path) as f:
             json.dump(data, f)
     except OSError:
         pass
+
+
+def _read_stale_cache(cache_path):
+    """Read cache regardless of TTL, for stale data recovery during rate limiting"""
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -3192,6 +3214,30 @@ def main():
                 line = "Token expired \u2014 restart Claude to refresh"
         elif e.code == 403:
             line = "Access denied \u2014 check your subscription"
+        elif e.code == 429:
+            # Rate limited \u2014 serve stale cached data with exponential backoff
+            stale = _read_stale_cache(cache_path)
+            fail_count = (stale.get("_fail_count", 0) + 1) if stale else 1
+            backoff = min(300, 60 * (2 ** (fail_count - 1)))
+            jitter = random.uniform(0, 10)
+            rate_limit_until = time.time() + backoff + jitter
+
+            if stale and "usage" in stale:
+                stale_usage = stale["usage"]
+                stale_plan = stale.get("plan", plan)
+                stale_user = stale.get("user", user)
+                line = build_status_line(
+                    stale_usage, stale_plan, config, stdin_ctx, user=stale_user
+                )
+            else:
+                line = "Rate limited \u2014 retrying shortly"
+
+            write_cache(
+                cache_path, line, usage=stale.get("usage") if stale else None,
+                plan=stale.get("plan", plan) if stale else plan,
+                user=stale.get("user", user) if stale else user,
+                rate_limit_until=rate_limit_until, fail_count=fail_count,
+            )
         else:
             line = f"API error: {e.code}"
     except urllib.error.URLError as e:
