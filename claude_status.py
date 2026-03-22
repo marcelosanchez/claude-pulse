@@ -53,8 +53,8 @@ GREEN_YELLOW = "\033[38;2;150;181;86m"  # #96b556 (20-40%, transición)
 YELLOW = "\033[38;2;245;197;75m"        # #f5c54b (40-60%, dorado)
 YELLOW_RED = "\033[38;2;238;136;84m"    # #ee8844 (60-80%, transición)
 RED = "\033[38;2;231;76;60m"            # #e74c3c (80-100%, coral)
-BLUE_MODEL = "\033[38;2;22;52;140m"     # #16348c (modelo)
-PURPLE_USER = "\033[38;2;87;35;100m"    # #572364 (usuario)
+BLUE_MODEL = "\033[38;2;50;75;110m"     # #324B6E (muted blue)
+PURPLE_USER = "\033[38;2;85;65;100m"    # #554164 (muted purple)
 GREEN_DARK = "\033[38;2;29;86;50m"      # #1d5632
 GREEN_YELLOW_DARK = "\033[38;2;78;94;44m"  # #4e5e2c
 YELLOW_DARK = "\033[38;2;127;102;39m"     # #7f6627
@@ -103,8 +103,8 @@ THEMES = {
 
 PLAN_NAMES = {
     "default_claude_pro": "Pro",
-    "default_claude_max_5x": "Max 5x",
-    "default_claude_max_20x": "Max 20x",
+    "default_claude_max_5x": "Max",
+    "default_claude_max_20x": "Max",
     "default_claude_ai": "AI",
 }
 
@@ -2238,10 +2238,6 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
             else:
                 parts.append(f"Context {ctx_bar} {label}")
 
-    # Plan name (hidden in minimal layout)
-    if layout != "minimal" and show.get("plan", True) and plan:
-        parts.append(_sanitize(plan))
-
     # Streak display
     if show.get("streak", True):
         try:
@@ -2258,9 +2254,16 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
         if model:
             parts.append(f"{BLUE_MODEL}{model}{RESET}")
 
-    # User name from parameter (colored purple)
-    if user and show.get("user", False):
+    # User + Plan combined segment: "User (Plan)"
+    show_plan = layout != "minimal" and show.get("plan", True) and plan
+    show_user = bool(user) and show.get("user", False)
+
+    if show_user and show_plan:
+        parts.append(f"{PURPLE_USER}{user} ({_sanitize(plan)}){RESET}")
+    elif show_user:
         parts.append(f"{PURPLE_USER}{user}{RESET}")
+    elif show_plan:
+        parts.append(_sanitize(plan))
 
     # Multi-line mode: split into usage metrics (line 1) and context info (line 2)
     multiline = config.get("multiline", False)

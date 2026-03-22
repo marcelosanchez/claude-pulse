@@ -7,7 +7,7 @@
   "show": {
     "session": true,
     "weekly": true,
-    "plan": false,
+    "plan": true,
     "timer": true,
     "extra": false,
     "user": true,
