@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal Claude Code status line — fetches real usage data from Anthropic's OAuth API."""
 
-VERSION = "2.2.0"
+VERSION = "2.2.2"
 
 import json
 import os
@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 DEFAULT_CACHE_TTL = 60
 BAR_SIZES = {"small": 4, "small-medium": 6, "medium": 8, "medium-large": 10, "large": 12}
-DEFAULT_BAR_SIZE = "medium"
+DEFAULT_BAR_SIZE = "large"
 DEFAULT_MAX_WIDTH_PCT = 80  # percentage of terminal width to use
 FILL = "\u2501"   # ━ (thin horizontal bar)
 EMPTY = "\u2500"   # ─ (thin line)
@@ -37,11 +37,27 @@ BAR_STYLES = {
 }
 DEFAULT_BAR_STYLE = "classic"
 
+# Gradient bar styles — each maps to (gradient_string, empty_char).
+# gradient_string: chars from empty to full; gives (len - 1) sub-levels per position.
+# empty_char: visible placeholder for unfilled slots (rendered DIM).
+BAR_GRADIENT_STYLES = {
+    "braille": ("\u28C0\u28C4\u28E4\u28E6\u28F6\u28F7\u28FF", "\u28C0"),
+    #  gradient: ⣀     ⣄     ⣤     ⣦     ⣶     ⣷     ⣿   empty: ⣀
+}
+
+# Auto-register gradient styles into BAR_STYLES (last char = filled, empty_char)
+for _gname, (_gchars, _gempty) in BAR_GRADIENT_STYLES.items():
+    BAR_STYLES[_gname] = (_gchars[-1], _gempty)
+
 # Precompute all bar characters for rainbow detection
 ALL_BAR_CHARS = set()
 for _f, _e in BAR_STYLES.values():
     ALL_BAR_CHARS.add(_f)
     ALL_BAR_CHARS.add(_e)
+for _gchars, _gempty in BAR_GRADIENT_STYLES.values():
+    for _gc in _gchars:
+        ALL_BAR_CHARS.add(_gc)
+
 
 # Text layouts — controls how labels, bars, and percentages are arranged
 LAYOUTS = ("standard", "compact", "minimal", "percent-first")
@@ -103,9 +119,9 @@ THEMES = {
 
 PLAN_NAMES = {
     "default_claude_pro": "Pro",
+    "default_claude_ai": "Pro",
     "default_claude_max_5x": "Max",
     "default_claude_max_20x": "Max",
-    "default_claude_ai": "AI",
 }
 
 MODEL_SHORT_NAMES = {
@@ -135,6 +151,115 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 # Pre-compile regex patterns for sanitization to avoid recompilation on every call
 _ANSI_PATTERN = re.compile(r'\x1b[^a-zA-Z]*[a-zA-Z]')
 _CONTROL_PATTERN = re.compile(r'[\x00-\x09\x0b-\x1f\x7f-\x9f]')
+
+_cached_terminal_width = None
+
+def _detect_terminal_width():
+    """Detect the real terminal width, even when stdout is piped.
+
+    Tries progressively heavier approaches, returning the first success:
+      1. os.get_terminal_size(stdout)  — direct TTY
+      2. os.get_terminal_size(stderr)  — works when only stdout is piped
+      3. os.get_terminal_size(stdin)   — same
+      4. /dev/tty via os.get_terminal_size — POSIX controlling terminal
+      5. COLUMNS env var               — honours explicit overrides
+      6. /proc walk (Linux only)        — last resort; walks parent pids
+         to find an ancestor with a terminal fd
+
+    Returns the column count (int), or None if undetectable.
+    The result is cached for the lifetime of the process (a single
+    status-line render), avoiding repeated /proc I/O.
+    """
+    global _cached_terminal_width
+    if _cached_terminal_width is not None:
+        return _cached_terminal_width if _cached_terminal_width > 0 else None
+
+    cols = _detect_terminal_width_uncached()
+    _cached_terminal_width = cols if cols is not None else -1
+    return cols
+
+
+def _detect_terminal_width_uncached():
+    """Internal: attempt each detection method in order."""
+    # 1-3. Try each standard fd — stderr/stdin may still be a TTY
+    for fd in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            return os.get_terminal_size(fd.fileno()).columns
+        except (OSError, ValueError, AttributeError):
+            pass
+    # 4. POSIX controlling terminal — works on Linux + macOS even with piped stdio
+    try:
+        tty_fd = os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY)
+        try:
+            return os.get_terminal_size(tty_fd).columns
+        finally:
+            os.close(tty_fd)
+    except OSError:
+        pass
+    # 5. Explicit COLUMNS environment variable
+    try:
+        cols = int(os.environ["COLUMNS"])
+        if cols > 0:
+            return cols
+    except (KeyError, ValueError):
+        pass
+    # 6. Linux /proc walk — last resort (see _detect_width_from_proc)
+    return _detect_width_from_proc()
+
+
+def _detect_width_from_proc():
+    """Query terminal width by walking the Linux process tree via /proc.
+
+    When all standard detection methods fail (common inside Claude Code where
+    stdout/stderr/stdin are all pipes and /dev/tty is unavailable), this walks
+    up the parent process chain looking for an ancestor that holds an open
+    file descriptor to a PTY.  It then queries TIOCGWINSZ on that fd to get
+    the real terminal dimensions.
+
+    Linux-only (/proc is not available on macOS/Windows).  Returns None on
+    non-Linux platforms or if no terminal fd is found.  All filesystem and
+    ioctl operations are individually caught so a failure at any point
+    (permissions, process exit, container restrictions) is silently skipped.
+
+    This function is self-contained — it can be removed without affecting
+    the rest of the detection cascade, which will fall back to shutil.
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        import fcntl, termios, struct  # Linux-only modules
+        pid = os.getpid()
+        for _ in range(10):
+            with open(f"/proc/{pid}/stat") as f:
+                raw = f.read()
+            # Parse ppid safely: comm field "(name)" can contain spaces
+            # and parens, so find the *last* ')' before splitting.
+            ppid = int(raw[raw.rfind(")") + 2:].split()[1])
+            if ppid <= 1:
+                break
+            fd_dir = f"/proc/{ppid}/fd"
+            try:
+                for fd_name in os.listdir(fd_dir):
+                    try:
+                        target = os.readlink(f"{fd_dir}/{fd_name}")
+                        if "/pts/" not in target and "/tty" not in target:
+                            continue
+                        fd = os.open(f"{fd_dir}/{fd_name}", os.O_RDONLY)
+                        try:
+                            buf = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\x00" * 8)
+                            cols = struct.unpack("HHHH", buf)[1]
+                            if cols > 0:
+                                return cols
+                        finally:
+                            os.close(fd)
+                    except (OSError, PermissionError):
+                        continue
+            except (OSError, PermissionError):
+                pass
+            pid = ppid
+    except (OSError, ValueError):
+        pass
+    return None
 
 def _sanitize(text):
     """Strip ANSI/terminal escape sequences and control characters from untrusted strings."""
@@ -194,6 +319,8 @@ THEME_TEXT_DEFAULTS = {
 DEFAULT_SHOW = {
     "session": True,
     "weekly": True,
+    "opus": True,
+    "sonnet": True,
     "plan": False,
     "timer": True,
     "extra": False,
@@ -207,6 +334,8 @@ DEFAULT_SHOW = {
     "claude_update": False,
     "weekly_timer": True,
     "user": True,
+    "effort": True,
+    "worktree": True,
 }
 
 # Presets — one-command config bundles
@@ -255,30 +384,52 @@ HISTORY_MAX_AGE = 86400  # 24 hours in seconds
 # Rainbow animation helpers
 # ---------------------------------------------------------------------------
 
-def hsv_to_rgb(h, s, v):
-    """Convert HSV (all 0-1) to RGB (0-255 ints)."""
-    if s == 0.0:
-        c = int(v * 255)
-        return c, c, c
-    h6 = h * 6.0
-    i = int(h6)
-    f = h6 - i
-    p = int(v * (1.0 - s) * 255)
-    q = int(v * (1.0 - s * f) * 255)
-    t = int(v * (1.0 - s * (1.0 - f)) * 255)
-    vi = int(v * 255)
-    i %= 6
-    if i == 0:
-        return vi, t, p
-    if i == 1:
-        return q, vi, p
-    if i == 2:
-        return p, vi, t
-    if i == 3:
-        return p, q, vi
-    if i == 4:
-        return t, p, vi
-    return vi, p, q
+# Ultrathink rainbow palette — matches Claude Code's ultrathink colors
+_ULTRATHINK_BASE = [
+    (235, 95, 87),   # red
+    (245, 139, 87),  # orange
+    (250, 195, 95),  # yellow
+    (145, 200, 130), # green
+    (130, 170, 220), # blue
+    (155, 130, 200), # indigo
+    (200, 130, 180), # violet
+]
+
+_ULTRATHINK_SHIMMER = [
+    (250, 155, 147), # red shimmer
+    (255, 185, 137), # orange shimmer
+    (255, 225, 155), # yellow shimmer
+    (185, 230, 180), # green shimmer
+    (180, 205, 240), # blue shimmer
+    (195, 180, 230), # indigo shimmer
+    (230, 180, 210), # violet shimmer
+]
+
+
+def _lerp_color(c1, c2, t):
+    """Linearly interpolate between two RGB tuples."""
+    return (
+        int(c1[0] + (c2[0] - c1[0]) * t),
+        int(c1[1] + (c2[1] - c1[1]) * t),
+        int(c1[2] + (c2[2] - c1[2]) * t),
+    )
+
+
+def _ultrathink_color(pos, shimmer_t=0.0):
+    """Map position (0.0-1.0) to an ultrathink rainbow color.
+
+    shimmer_t: 0.0 = base colors, 1.0 = full shimmer colors.
+    """
+    n = len(_ULTRATHINK_BASE)
+    scaled = pos * n
+    idx = int(scaled) % n
+    frac = scaled - int(scaled)
+    next_idx = (idx + 1) % n
+    base = _lerp_color(_ULTRATHINK_BASE[idx], _ULTRATHINK_BASE[next_idx], frac)
+    if shimmer_t > 0.0:
+        shimmer = _lerp_color(_ULTRATHINK_SHIMMER[idx], _ULTRATHINK_SHIMMER[next_idx], frac)
+        return _lerp_color(base, shimmer, shimmer_t)
+    return base
 
 
 def rainbow_colorize(text, color_all=True, shimmer=True):
@@ -335,10 +486,15 @@ def rainbow_colorize(text, color_all=True, shimmer=True):
             result.append(text[i])
         else:
             # Wider bands: 0.025 per char = full rainbow every ~40 chars
-            hue = ((visible_idx * 0.025) + hue_drift) % 1.0
+            pos = ((visible_idx * 0.025) + hue_drift) % 1.0
 
-            # Vivid rainbow: high saturation and brightness
-            r, g, b = hsv_to_rgb(hue, 0.92, 0.95)
+            # Ultrathink palette with shimmer pulse when animating
+            if shimmer:
+                # Triangle wave 0→1→0 over ~1.3s cycle for breathing effect
+                pulse = abs((now * 1.5) % 2.0 - 1.0)
+            else:
+                pulse = 0.0
+            r, g, b = _ultrathink_color(pos, pulse)
             result.append(f"\033[38;2;{r};{g};{b}m{text[i]}\033[0m")
 
         visible_idx += 1
@@ -443,13 +599,35 @@ def _get_cache_base_path():
 
 
 def get_config_path():
-    """Return path to user config — stored alongside cache, outside the repo."""
-    config_dir = _get_cache_base_path() / "claude-status"
+    """Return path to user config — stored under XDG_CONFIG_HOME, outside the repo."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    config_dir = base / "claude-status"
     _secure_mkdir(config_dir)
     return config_dir / "config.json"
 
 
+def _migrate_config_from_cache():
+    """One-time migration: move config.json from ~/.cache to ~/.config."""
+    new_path = get_config_path()
+    if new_path.exists():
+        return  # already migrated or user created config at new location
+    # Build the old path (XDG_CACHE_HOME based)
+    if sys.platform == "win32":
+        return  # Windows uses LOCALAPPDATA for both; no migration needed
+    old_base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    old_path = old_base / "claude-status" / "config.json"
+    if old_path.exists():
+        try:
+            shutil.move(str(old_path), str(new_path))
+        except OSError:
+            pass
+
+
 def load_config():
+    _migrate_config_from_cache()
     user_path = get_config_path()
     repo_path = Path(__file__).parent / "config.json"
 
@@ -592,6 +770,37 @@ _GIT_PATH = shutil.which("git") or "git"  # resolve once at import time
 _CLAUDE_PATH = shutil.which("claude")  # resolve once at import time
 
 
+def _detect_status_bar_conflict():
+    """Detect conditions where Claude Code's status bar is too crowded for pulse.
+
+    When Claude Code migrates from npm to native installer, it shows a long
+    notification that fills the entire status bar area, causing pulse output
+    to wrap.  Suppress output until the user resolves the migration.
+
+    Recent npm versions also show this notification to encourage migration,
+    so we check for the npm package presence regardless of which binary
+    ``shutil.which("claude")`` resolves to (the npm shim may shadow the
+    native binary on PATH).
+    """
+    try:
+        if sys.platform == "win32":
+            appdata = os.environ.get("APPDATA", "")
+            if not appdata:
+                return False
+            npm_pkg = os.path.join(appdata, "npm", "node_modules",
+                                   "@anthropic-ai", "claude-code")
+            return os.path.isdir(npm_pkg)
+        elif sys.platform == "darwin":
+            for prefix in ("/usr/local", "/opt/homebrew"):
+                npm_pkg = os.path.join(prefix, "lib", "node_modules",
+                                       "@anthropic-ai", "claude-code")
+                if os.path.isdir(npm_pkg):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def get_local_commit():
     """Get the local git HEAD commit hash (short). Returns None on failure."""
     repo_dir = Path(__file__).resolve().parent
@@ -611,7 +820,7 @@ def get_local_commit():
 def get_remote_commit():
     """Fetch the latest commit hash from GitHub API. Returns None on failure."""
     try:
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/master"
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
         req = urllib.request.Request(url, headers={
             "Accept": "application/vnd.github.sha",
             "User-Agent": "claude-pulse-update-checker",
@@ -655,16 +864,22 @@ def check_for_update():
     state_dir = get_state_dir()
     update_cache = state_dir / "update_check.json"
 
-    # Check cache first
-    cached = _check_update_cache(update_cache, UPDATE_CHECK_TTL)
-    if cached is not None:
-        return cached.get("update_available", False)
-
-    # Perform the check
+    # Get local commit first so we can validate cache
     local = get_local_commit()
     if not local:
         return None  # not a git install, skip silently
 
+    # Read cached result — skip if local version changed (e.g. after update)
+    try:
+        with open(update_cache, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if (time.time() - cached.get("timestamp", 0) < UPDATE_CHECK_TTL
+                and cached.get("local") == local[:8]):
+            return cached.get("update_available", False)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+
+    # Perform the check
     remote = get_remote_commit()
     if not remote:
         return None  # network error, skip silently
@@ -703,12 +918,7 @@ def check_claude_code_update():
     state_dir = get_state_dir()
     update_cache = state_dir / "claude_code_update.json"
 
-    # Check cache first
-    cached = _check_update_cache(update_cache, UPDATE_CHECK_TTL)
-    if cached is not None:
-        return cached.get("update_available", False)
-
-    # Get installed version
+    # Get installed version first so we can validate cache
     try:
         result = subprocess.run(
             [_CLAUDE_PATH, "--version"],
@@ -720,6 +930,16 @@ def check_claude_code_update():
         local_version = result.stdout.strip().split()[0]
     except Exception:
         return None
+
+    # Read cached result — skip if local version changed (e.g. after claude update)
+    try:
+        with open(update_cache, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if (time.time() - cached.get("timestamp", 0) < UPDATE_CHECK_TTL
+                and cached.get("local") == _sanitize(local_version)):
+            return cached.get("update_available", False)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
 
     # Get latest version from npm registry
     try:
@@ -772,9 +992,9 @@ def _read_version_from_file(script_path):
 
 
 def _fetch_remote_version():
-    """Fetch the VERSION string from the latest master on GitHub. Returns None on failure."""
+    """Fetch the VERSION string from the latest main on GitHub. Returns None on failure."""
     try:
-        url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/master/claude_status.py"
+        url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/claude_status.py"
         req = urllib.request.Request(url, headers={"User-Agent": "claude-pulse-update-checker"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             for raw_line in resp:
@@ -865,7 +1085,7 @@ def cmd_update():
     utf8_print(f"  Pulling latest from GitHub...")
     try:
         result = subprocess.run(
-            [_GIT_PATH, "pull", "origin", "master"],
+            [_GIT_PATH, "pull", "origin", "main"],
             capture_output=True, text=True, timeout=30,
             cwd=str(repo_dir),
         )
@@ -928,6 +1148,9 @@ def cmd_update():
         utf8_print(f"  {RED}Update error: {type(e).__name__}{RESET}")
 
 
+_ERROR_CACHE_TTL = 10  # seconds — retry errors faster than normal data
+
+
 def read_cache(cache_path, ttl):
     """Return the full cache dict if fresh, else None.
 
@@ -948,19 +1171,37 @@ def read_cache(cache_path, ttl):
         if rate_limit_until and time.time() < rate_limit_until:
             return cached
 
-        # If previous fetch failed (non-429), retry aggressively every 3s
+        # If previous fetch failed (non-429), retry aggressively
         failed = cached.get("_fetch_failed", False)
         if failed and age < 3:
             return None
-        # Normal TTL
-        if age < ttl:
+        # Error-only entries (no usage data) expire faster so we retry sooner
+        effective_ttl = ttl if "usage" in cached else _ERROR_CACHE_TTL
+        if age < effective_ttl:
             return cached
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
         pass
     return None
 
 
-_USAGE_CACHE_KEYS = {"five_hour", "seven_day", "extra_usage"}
+def _read_stale_cache(cache_path):
+    """Return cached data regardless of age, or None if unavailable.
+
+    Prefers entries with 'usage' data, but also accepts entries with just
+    a rendered 'line' — this prevents sticky error states when a 429 hits
+    before any usage data has been cached.
+    """
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if "usage" in cached or "line" in cached:
+            return cached
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, OSError):
+        pass
+    return None
+
+
+_USAGE_CACHE_KEYS = {"five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "extra_usage"}
 
 def write_cache(cache_path, line, usage=None, plan=None, user=None,
                 fetch_failed=False, rate_limit_until=0, fail_count=0):
@@ -999,7 +1240,7 @@ def _read_stale_cache(cache_path):
 # SECURITY: OAuth tokens are ONLY sent to these Anthropic-owned domains.
 # They are never written to cache/state files, never logged, and never
 # sent anywhere else. The _authorized_request() guard enforces this.
-_TOKEN_ALLOWED_DOMAINS = frozenset({"api.anthropic.com", "console.anthropic.com"})
+_TOKEN_ALLOWED_DOMAINS = frozenset({"api.anthropic.com", "console.anthropic.com", "platform.claude.com"})
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -1031,6 +1272,7 @@ def _authorized_request(url, token, headers=None, data=None, method=None, timeou
     hdrs = dict(headers) if headers else {}
     if token:
         hdrs["Authorization"] = f"Bearer {token}"
+    hdrs.setdefault("User-Agent", f"claude-pulse/{VERSION}")
     req = urllib.request.Request(url, headers=hdrs, data=data, method=method)
     return _safe_opener.open(req, timeout=timeout)
 
@@ -1092,7 +1334,7 @@ def _refresh_oauth_token(refresh_token):
             "refresh_token": refresh_token,
         }).encode("utf-8")
         with _authorized_request(
-            "https://console.anthropic.com/v1/oauth/token",
+            "https://platform.claude.com/v1/oauth/token",
             None,  # no Bearer token — this uses the refresh token in the body
             data=body,
             headers={"Content-Type": "application/json", "Accept": "application/json"},
@@ -1219,8 +1461,30 @@ def make_bar(pct, theme=None, plain=False, width=None, bar_style=None):
         theme = THEMES["default"]
     if width is None:
         width = BAR_SIZES[DEFAULT_BAR_SIZE]
-    fill_char, empty_char = BAR_STYLES.get(bar_style or DEFAULT_BAR_STYLE, BAR_STYLES[DEFAULT_BAR_STYLE])
+    style = bar_style or DEFAULT_BAR_STYLE
     pct = pct or 0
+
+    # Gradient styles: sub-character fill granularity
+    gradient_data = BAR_GRADIENT_STYLES.get(style)
+    if gradient_data is not None:
+        gradient, empty_char = gradient_data
+        levels = len(gradient) - 1  # sub-levels per char (e.g. 6 for braille)
+        total_steps = width * levels
+        filled_steps = round(pct / 100 * total_steps)
+        filled_steps = max(0, min(total_steps, filled_steps))
+        full = filled_steps // levels
+        partial = filled_steps % levels
+        empty = width - full - (1 if partial else 0)
+        bar_fill = gradient[-1] * full
+        bar_partial = gradient[partial] if partial else ""
+        bar_empty = empty_char * empty
+        if plain:
+            return f"{bar_fill}{bar_partial}{DIM}{bar_empty}{RESET}"
+        colour = bar_colour(pct, theme)
+        return f"{colour}{bar_fill}{bar_partial}{DIM}{bar_empty}{RESET}"
+
+    # Standard binary fill
+    fill_char, empty_char = BAR_STYLES.get(style, BAR_STYLES[DEFAULT_BAR_STYLE])
     filled = round(pct / 100 * width)
     filled = max(0, min(width, filled))
     if plain:
@@ -1229,6 +1493,22 @@ def make_bar(pct, theme=None, plain=False, width=None, bar_style=None):
         return f"{fill_char * filled}{DIM}{empty_char * (width - filled)}{RESET}"
     colour = bar_colour(pct, theme)
     return f"{colour}{fill_char * filled}{DIM}{empty_char * (width - filled)}{RESET}"
+
+
+def _calc_pace_pct(resets_at_str, window_seconds):
+    """Return expected usage % based on elapsed time in the window, or None."""
+    if not resets_at_str:
+        return None
+    try:
+        resets_at = datetime.fromisoformat(resets_at_str)
+        now = datetime.now(timezone.utc)
+        remaining = (resets_at - now).total_seconds()
+        elapsed = window_seconds - remaining
+        if elapsed <= 0 or window_seconds <= 0:
+            return None
+        return min(100.0, max(0.0, (elapsed / window_seconds) * 100))
+    except Exception:
+        return None
 
 
 def format_reset_time(resets_at_str):
@@ -1251,6 +1531,8 @@ def format_reset_time(resets_at_str):
 
 WEEKLY_TIMER_FORMATS = ("auto", "countdown", "date", "full")
 DEFAULT_WEEKLY_TIMER_FORMAT = "auto"
+CLOCK_FORMATS = ("12h", "24h")
+DEFAULT_CLOCK_FORMAT = "12h"
 DEFAULT_WEEKLY_TIMER_PREFIX = "R:"
 
 
@@ -1267,11 +1549,13 @@ def _weekly_countdown(total_seconds):
     return f"{minutes}m"
 
 
-def _weekly_date(resets_at):
-    """Format reset time as local day+hour: 'Sat 5pm'."""
+def _weekly_date(resets_at, clock="12h"):
+    """Format reset time as local day+hour: 'Sat 5pm' or 'Sat 17:00'."""
     local_dt = resets_at.astimezone()
     hour = local_dt.hour
-    if hour == 0:
+    if clock == "24h":
+        time_str = f"{hour:02d}:{local_dt.minute:02d}"
+    elif hour == 0:
         time_str = "12am"
     elif hour < 12:
         time_str = f"{hour}am"
@@ -1282,14 +1566,16 @@ def _weekly_date(resets_at):
     return f"{local_dt.strftime('%a')} {time_str}"
 
 
-def format_weekly_reset(resets_at_str, fmt="auto"):
+def format_weekly_reset(resets_at_str, fmt="auto", clock="12h"):
     """Format weekly reset time.
 
     Formats:
       auto      — date when >24h, countdown when <24h (default)
       countdown — always show countdown: '2d 5h' / '14h 22m' / '45m'
-      date      — always show date: 'Sat 5pm'
+      date      — always show date: 'Sat 5pm' (or 'Sat 17:00' with clock='24h')
       full      — both: 'Sat 5pm · 2d 5h'
+
+    clock: '12h' for am/pm display, '24h' for 24-hour display.
     """
     if not resets_at_str:
         return None
@@ -1303,13 +1589,13 @@ def format_weekly_reset(resets_at_str, fmt="auto"):
         if fmt == "countdown":
             return _weekly_countdown(total_seconds)
         if fmt == "date":
-            return _weekly_date(resets_at)
+            return _weekly_date(resets_at, clock=clock)
         if fmt == "full":
-            return f"{_weekly_date(resets_at)} \u00b7 {_weekly_countdown(total_seconds)}"
+            return f"{_weekly_date(resets_at, clock=clock)} \u00b7 {_weekly_countdown(total_seconds)}"
         # auto: date when >24h, countdown when <24h
         if total_seconds < 86400:
             return _weekly_countdown(total_seconds)
-        return _weekly_date(resets_at)
+        return _weekly_date(resets_at, clock=clock)
     except (ValueError, TypeError):
         return None
 
@@ -1691,6 +1977,19 @@ def _parse_stdin_context(raw_stdin):
     except (AttributeError, KeyError, ValueError, TypeError):
         pass
 
+    # Worktree (v2.1.69+)
+    try:
+        wt = data.get("data", data).get("worktree", {})
+        if wt:
+            branch = _sanitize(wt.get("branch", ""))
+            name = _sanitize(wt.get("name", ""))
+            if branch:
+                result["worktree_branch"] = branch
+            elif name:
+                result["worktree_branch"] = name
+    except (AttributeError, KeyError):
+        pass
+
     return result
 
 
@@ -2069,28 +2368,34 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
     bstyle = config.get("bar_style", DEFAULT_BAR_STYLE)
     layout = config.get("layout", DEFAULT_LAYOUT)
 
-    # Terminal width clamping — use a percentage of terminal width (default 80%)
-    # to leave room for other Claude Code UI elements sharing the status line
+    # Terminal width clamping — shrink bars proportionally when the viewport
+    # is narrower than the full rendered line.  _detect_terminal_width tries
+    # real TTY, stderr/stdin fds, /dev/tty, COLUMNS env, then /proc on Linux.
+    # When all fail, fall back to shutil's conservative estimate so bars still
+    # shrink to keep all sections visible rather than being truncated.
     try:
-        term_width = shutil.get_terminal_size((120, 24)).columns
+        term_width = _detect_terminal_width() or shutil.get_terminal_size((120, 24)).columns
         max_width_pct = config.get("max_width", DEFAULT_MAX_WIDTH_PCT)
         if not (isinstance(max_width_pct, int) and 20 <= max_width_pct <= 100):
             max_width_pct = DEFAULT_MAX_WIDTH_PCT
         effective_width = (term_width * max_width_pct) // 100
-        # Count how many bar sections we'll render
+        # Count ALL bar sections that will be rendered (session, weekly,
+        # extra, context) so the width budget is split correctly.
         num_bars = sum(1 for k in ("session", "weekly") if show.get(k, True))
         extra = usage.get("extra_usage")
         if extra and extra.get("is_enabled") and not config.get("extra_hidden", False):
             num_bars += 1
-        # Each bar section ≈ bw + 25 chars of labels/percentage/timer
-        # Separators: " | " = 3 chars each
-        # Plan + update indicators + model ≈ 40 chars
-        overhead = num_bars * 25 + max(num_bars - 1, 0) * 3 + 40
+        if stdin_ctx and show.get("context", True):
+            num_bars += 1
+        # Per-bar overhead: label + space + space + pct + timer ≈ 18 chars
+        # Separators between sections: " | " = 3 chars each
+        # Trailing fixed items (model name, update/plan indicators) ≈ 15 chars
+        overhead = num_bars * 18 + max(num_bars - 1, 0) * 3 + 15
         max_bar_width = max(2, (effective_width - overhead) // max(num_bars, 1))
         if bw > max_bar_width:
             bw = max_bar_width
     except Exception:
-        pass  # if terminal size detection fails, use configured size
+        pass  # if width detection/clamping fails, use configured bar size
 
     parts = []
 
@@ -2102,12 +2407,14 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
             bar = make_bar(pct, theme, plain=bar_plain, width=bw, bar_style=bstyle)
             reset = format_reset_time(five.get("resets_at")) if show.get("timer", True) else None
             reset_str = f" {reset}" if reset else ""
+            pace = _calc_pace_pct(five.get("resets_at"), 18000)
+            pace_str = f" ({pace:.0f}%)" if pace is not None else ""
             if layout == "compact":
-                parts.append(f"S {bar} {pct:.0f}%{reset_str}")
+                parts.append(f"S {bar} {pct:.0f}%{pace_str}{reset_str}")
             elif layout == "minimal":
-                parts.append(f"{bar} {pct:.0f}%{reset_str}")
+                parts.append(f"{bar} {pct:.0f}%{pace_str}{reset_str}")
             elif layout == "percent-first":
-                parts.append(f"{pct:.0f}% {bar}{reset_str}")
+                parts.append(f"{pct:.0f}%{pace_str} {bar}{reset_str}")
             else:  # standard
                 # Load history once for sparkline, runway, and smart messages
                 history = _read_history() if show.get("sparkline", True) or show.get("runway", True) or show.get("status_message", True) else []
@@ -2132,7 +2439,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
                 # Separate timer from runway/sparkline with · when both present
                 if reset_str and (runway_str or spark_str):
                     reset_str = f" \u00b7{reset}"
-                parts.append(f"{label} {bar} {pct:.0f}%{spark_str}{runway_str}{reset_str}")
+                parts.append(f"{label} {bar} {pct:.0f}%{pace_str}{spark_str}{runway_str}{reset_str}")
         else:
             bar = make_bar(0, theme, plain=bar_plain, width=bw, bar_style=bstyle)
             if layout == "compact":
@@ -2155,17 +2462,55 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
                 wt_fmt = config.get("weekly_timer_format", DEFAULT_WEEKLY_TIMER_FORMAT)
                 if wt_fmt not in WEEKLY_TIMER_FORMATS:
                     wt_fmt = DEFAULT_WEEKLY_TIMER_FORMAT
-                wr = format_weekly_reset(seven.get("resets_at"), fmt=wt_fmt)
+                wt_prefix = _sanitize(str(config.get("weekly_timer_prefix", DEFAULT_WEEKLY_TIMER_PREFIX)))[:10]
+                wt_clock = config.get("clock_format", DEFAULT_CLOCK_FORMAT)
+                if wt_clock not in CLOCK_FORMATS:
+                    wt_clock = DEFAULT_CLOCK_FORMAT
+                wr = format_weekly_reset(seven.get("resets_at"), fmt=wt_fmt, clock=wt_clock)
                 if wr:
-                    weekly_reset_str = f" | {wr}"
+                    weekly_reset_str = f" {wt_prefix}{wr}"
+            pace = _calc_pace_pct(seven.get("resets_at"), 604800)
+            pace_str = f" ({pace:.0f}%)" if pace is not None else ""
             if layout == "compact":
-                parts.append(f"W {bar} {pct:.0f}%{weekly_reset_str}")
+                parts.append(f"W {bar} {pct:.0f}%{pace_str}{weekly_reset_str}")
             elif layout == "minimal":
-                parts.append(f"{bar} {pct:.0f}%{weekly_reset_str}")
+                parts.append(f"{bar} {pct:.0f}%{pace_str}{weekly_reset_str}")
             elif layout == "percent-first":
-                parts.append(f"{pct:.0f}% {bar}{weekly_reset_str}")
+                parts.append(f"{pct:.0f}%{pace_str} {bar}{weekly_reset_str}")
             else:
-                parts.append(f"Weekly {bar} {pct:.0f}%{weekly_reset_str}")
+                parts.append(f"Weekly {bar} {pct:.0f}%{pace_str}{weekly_reset_str}")
+
+    # Opus weekly limit (separate per-model cap)
+    if show.get("opus", True):
+        opus = usage.get("seven_day_opus")
+        if opus and opus.get("utilization") is not None:
+            pct = opus.get("utilization") or 0
+            bar = make_bar(pct, theme, plain=bar_plain, width=bw, bar_style=bstyle)
+            if layout == "compact":
+                parts.append(f"O {bar} {pct:.0f}%")
+            elif layout == "minimal":
+                parts.append(f"{bar} {pct:.0f}%")
+            elif layout == "percent-first":
+                parts.append(f"{pct:.0f}% {bar}")
+            else:
+                parts.append(f"Opus {bar} {pct:.0f}%")
+
+    # Sonnet weekly limit (separate per-model cap)
+    if show.get("sonnet", True):
+        sonnet = usage.get("seven_day_sonnet")
+        if sonnet and sonnet.get("utilization") is not None:
+            pct = sonnet.get("utilization") or 0
+            bar = make_bar(pct, theme, plain=bar_plain, width=bw, bar_style=bstyle)
+            pace = _calc_pace_pct(sonnet.get("resets_at"), 604800)
+            pace_str = f" ({pace:.0f}%)" if pace is not None else ""
+            if layout == "compact":
+                parts.append(f"S {bar} {pct:.0f}%{pace_str}")
+            elif layout == "minimal":
+                parts.append(f"{bar} {pct:.0f}%{pace_str}")
+            elif layout == "percent-first":
+                parts.append(f"{pct:.0f}%{pace_str} {bar}")
+            else:
+                parts.append(f"Sonnet {bar} {pct:.0f}%{pace_str}")
 
     # Extra usage (bonus/gifted credits)
     # Auto-shows when credits are gifted, unless user explicitly hid it
@@ -2254,6 +2599,21 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
         if model:
             parts.append(f"{BLUE_MODEL}{model}{RESET}")
 
+    # Effort level from env var (set by Claude Code v2.1.68+)
+    if show.get("effort", True):
+        effort = os.environ.get("CLAUDE_CODE_EFFORT_LEVEL", "")
+        if effort and effort != "unset":
+            effort = _sanitize(effort)
+            # Compact labels: "low" "med" "high" "max"
+            effort_short = {"medium": "med"}.get(effort, effort)
+            parts.append(effort_short)
+
+    # Worktree branch from stdin context (v2.1.69+)
+    if stdin_ctx and show.get("worktree", True):
+        wt_branch = stdin_ctx.get("worktree_branch")
+        if wt_branch:
+            parts.append(wt_branch)
+
     # User + Plan combined segment: "User (Plan)"
     show_plan = layout != "minimal" and show.get("plan", True) and plan
     show_user = bool(user) and show.get("user", False)
@@ -2319,10 +2679,17 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
             if text_color_code:
                 line = apply_text_color(line, text_color_code)
 
-    # Final truncation — clip visible characters to effective terminal width
-    # so the line never spills into Claude Code's side notification area
+    return line
+
+
+def _truncate_line(line, config):
+    """Clip visible characters to effective terminal width.
+
+    Applied as the very last step before output so the line never spills
+    into Claude Code's side notification area or wraps to the next line.
+    """
     try:
-        term_width = shutil.get_terminal_size((120, 24)).columns
+        term_width = _detect_terminal_width() or shutil.get_terminal_size((120, 24)).columns
         max_width_pct = config.get("max_width", DEFAULT_MAX_WIDTH_PCT)
         if not (isinstance(max_width_pct, int) and 20 <= max_width_pct <= 100):
             max_width_pct = DEFAULT_MAX_WIDTH_PCT
@@ -2347,7 +2714,6 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
             line = line[:cut] + RESET
     except Exception:
         pass
-
     return line + "\n"
 
 
@@ -2355,13 +2721,30 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
 # Install
 # ---------------------------------------------------------------------------
 
+def _win_portable_path(path_str):
+    """Convert a Windows absolute path to use $HOME where possible.
+
+    Claude Code v2.1.47+ invokes statusLine commands via a shell that
+    does not expand backslash paths correctly on Windows.  Using forward
+    slashes and ``$HOME`` instead of the literal home directory avoids
+    the issue.  See: https://github.com/anthropics/claude-code/issues/27057
+    """
+    if sys.platform != "win32":
+        return path_str
+    path_str = str(path_str).replace("\\", "/")
+    home = str(Path.home()).replace("\\", "/")
+    if path_str.startswith(home + "/") or path_str == home:
+        path_str = "$HOME" + path_str[len(home):]
+    return path_str
+
+
 def _get_python_cmd():
     """Return the Python command to use in hooks/settings.
 
     Uses sys.executable to ensure we match whatever Python is running this script.
     On Linux this is typically 'python3', on Windows 'python'.
     """
-    exe = sys.executable
+    exe = _win_portable_path(sys.executable)
     # If the executable path contains spaces, quote it
     if " " in exe:
         return f'"{exe}"'
@@ -2370,7 +2753,7 @@ def _get_python_cmd():
 
 def install_status_line():
     settings_path = Path.home() / ".claude" / "settings.json"
-    script_path = Path(__file__).resolve()
+    script_path = _win_portable_path(Path(__file__).resolve())
     python_cmd = _get_python_cmd()
 
     settings = {}
@@ -2381,7 +2764,7 @@ def install_status_line():
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Status line command
+    # Status line command — use $HOME on Windows for Claude Code compat
     settings["statusLine"] = {
         "type": "command",
         "command": f'{python_cmd} "{script_path}"',
@@ -2512,10 +2895,19 @@ def cmd_show_all():
 
 
 def cmd_set_theme(name):
-    """Set the active theme and save to config."""
+    """Set the active theme and save to config.
+
+    Special case: ``--theme default`` applies the full factory-reset preset
+    so that bar size, text colour, animation, etc. all return to defaults —
+    not just the colour palette.
+    """
     if name not in THEMES:
         utf8_print(f"Unknown theme: {_sanitize(name)}")
         utf8_print(f"Available: {', '.join(THEMES.keys())}")
+        return
+    # "default" means full factory reset, not just the colour palette
+    if name == "default" and "default" in PRESETS:
+        cmd_preset("default")
         return
     config = load_config()
     config["theme"] = name
@@ -2578,12 +2970,12 @@ def cmd_preset(name):
     # Apply config overrides (bar_size, layout, max_width, etc.)
     for key, val in preset["config"].items():
         config[key] = val
-    # Apply show/hide overrides — preserve update and claude_update
+    # Apply show/hide overrides — respect user preferences for update notifications
     for key, val in preset["show_overrides"].items():
         config["show"][key] = val
-    # Always keep update notifications on
-    config["show"]["update"] = True
-    config["show"]["claude_update"] = True
+    # Full reset should also clear sticky flags
+    if name == "default":
+        config.pop("extra_hidden", None)
     save_config(config)
     try:
         os.remove(get_cache_path())
@@ -2622,7 +3014,11 @@ def cmd_print_config():
     utf8_print(f"  Max width: {mw}% of terminal")
     bst = config.get("bar_style", DEFAULT_BAR_STYLE)
     bst_chars = BAR_STYLES.get(bst, BAR_STYLES[DEFAULT_BAR_STYLE])
-    utf8_print(f"  Bar style: {bst} ({bst_chars[0]}{bst_chars[1]})")
+    if bst in BAR_GRADIENT_STYLES:
+        _g = BAR_GRADIENT_STYLES[bst][0]
+        utf8_print(f"  Bar style: {bst} ({_g[0]}..{_g[-1]})")
+    else:
+        utf8_print(f"  Bar style: {bst} ({bst_chars[0]}{bst_chars[1]})")
     ly = config.get("layout", DEFAULT_LAYOUT)
     utf8_print(f"  Layout:    {ly}")
     cf = config.get("context_format", "percent")
@@ -2636,7 +3032,10 @@ def cmd_print_config():
     wt_pfx = _sanitize(str(config.get("weekly_timer_prefix", DEFAULT_WEEKLY_TIMER_PREFIX)))[:10]
     wt_vis = show.get("weekly_timer", True)
     wt_state = f"{GREEN}on{RESET}" if wt_vis else f"{RED}off{RESET}"
-    utf8_print(f"  Weekly timer:  {wt_state}  format={wt_fmt}  prefix=\"{wt_pfx}\"")
+    wt_clk = config.get("clock_format", DEFAULT_CLOCK_FORMAT)
+    if wt_clk not in CLOCK_FORMATS:
+        wt_clk = DEFAULT_CLOCK_FORMAT
+    utf8_print(f"  Weekly timer:  {wt_state}  format={wt_fmt}  prefix=\"{wt_pfx}\"  clock={wt_clk}")
     anim = config.get("animate", False)
     anim_state = f"{GREEN}on{RESET}" if anim else f"{RED}off{RESET}"
     utf8_print(f"  Animation:    {anim_state}  ({'rainbow always moving' if anim else 'static'})")
@@ -2924,12 +3323,28 @@ def main():
             save_config(config)
             _clear_cache()
             fill_ch, empty_ch = BAR_STYLES[val]
-            demo = f"{GREEN}{fill_ch * 4}{DIM}{empty_ch * 4}{RESET}"
+            _grad_data = BAR_GRADIENT_STYLES.get(val)
+            if _grad_data:
+                _grad = _grad_data[0]
+                n = len(_grad)
+                colored = "".join(_grad[n - 1 - i * (n - 1) // 7] for i in range(4))
+                dimmed = "".join(_grad[n - 1 - (i + 4) * (n - 1) // 7] for i in range(4))
+                demo = f"{GREEN}{colored}{DIM}{dimmed}{RESET}"
+            else:
+                demo = f"{GREEN}{fill_ch * 4}{DIM}{empty_ch * 4}{RESET}"
             utf8_print(f"Bar style: {BOLD}{val}{RESET}  {demo}")
         else:
             utf8_print(f"Usage: --bar-style <name>\n")
             for name, (fc, ec) in BAR_STYLES.items():
-                demo = f"{GREEN}{fc * 4}{DIM}{ec * 4}{RESET}"
+                _grad_data = BAR_GRADIENT_STYLES.get(name)
+                if _grad_data:
+                    _grad = _grad_data[0]
+                    n = len(_grad)
+                    colored = "".join(_grad[n - 1 - i * (n - 1) // 7] for i in range(4))
+                    dimmed = "".join(_grad[n - 1 - (i + 4) * (n - 1) // 7] for i in range(4))
+                    demo = f"{GREEN}{colored}{DIM}{dimmed}{RESET}"
+                else:
+                    demo = f"{GREEN}{fc * 4}{DIM}{ec * 4}{RESET}"
                 utf8_print(f"  {name:<10} {demo}")
         return
 
@@ -3050,6 +3465,32 @@ def main():
             utf8_print('Usage: --weekly-timer-prefix <text>  (e.g. "R:", "Resets:", "")')
         return
 
+    if "--clock-format" in args:
+        idx = args.index("--clock-format")
+        if idx + 1 < len(args):
+            val = args[idx + 1].lower()
+            if val not in CLOCK_FORMATS:
+                utf8_print(f"Unknown clock format: {_sanitize(val)}")
+                utf8_print(f"Available: {', '.join(CLOCK_FORMATS)}")
+                return
+            config = load_config()
+            config["clock_format"] = val
+            save_config(config)
+            try:
+                os.remove(get_cache_path())
+            except OSError:
+                pass
+            descriptions = {
+                "12h": "12-hour with am/pm (Fri 5pm)",
+                "24h": "24-hour (Fri 17:00)",
+            }
+            utf8_print(f"Clock format: {BOLD}{val}{RESET}  ({descriptions[val]})")
+        else:
+            utf8_print("Usage: --clock-format <mode>\n")
+            utf8_print("  12h  12-hour with am/pm: Fri 5pm (default)")
+            utf8_print("  24h  24-hour: Fri 17:00")
+        return
+
     if "--stats" in args:
         cmd_stats()
         return
@@ -3134,6 +3575,10 @@ def main():
     cache_ttl = config.get("cache_ttl_seconds", DEFAULT_CACHE_TTL)
     animate = config.get("animate", False)
 
+    # Note: _detect_status_bar_conflict() removed — it suppressed all output
+    # when leftover npm @anthropic-ai/claude-code files existed on disk,
+    # even after migrating to the native installer.
+
     # One-time cleanup of legacy hooks from pre-v2.2.0
     try:
         _cleanup_hooks()
@@ -3149,8 +3594,9 @@ def main():
 
     # Persist stdin context (model, context %) in a separate file so it
     # survives across refreshes that don't receive stdin data from Claude Code.
-    # Only parse stdin if new data received (avoid redundant parsing).
-    _STDIN_CTX_KEYS = {"model_name", "context_pct", "context_used", "context_limit", "cost_usd"}
+    # Merge new data into persisted data so partial updates (e.g. model but
+    # no context_pct during thinking) don't wipe previously known fields.
+    _STDIN_CTX_KEYS = {"model_name", "context_pct", "context_used", "context_limit", "cost_usd", "worktree_branch"}
     stdin_ctx_path = get_state_dir() / "stdin_ctx.json"
     persisted = {}
     try:
@@ -3181,6 +3627,7 @@ def main():
             line = cached.get("line", "")
         line = append_update_indicator(line, config)
         line = append_claude_update_indicator(line, config)
+        line = _truncate_line(line, config)
         sys.stdout.buffer.write((line + RESET + "\n\n").encode("utf-8"))
         return
 
@@ -3285,8 +3732,12 @@ def main():
                 line = line + f" {BRIGHT_YELLOW}{milestone}{RESET}"
         except Exception:
             pass
+    else:
+        # Cache error lines so we don't hammer the API on every refresh
+        write_cache(cache_path, line)
     line = append_update_indicator(line, config)
     line = append_claude_update_indicator(line, config)
+    line = _truncate_line(line, config)
     sys.stdout.buffer.write((line + RESET + "\n\n").encode("utf-8"))
 
 

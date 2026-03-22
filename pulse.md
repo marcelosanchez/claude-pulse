@@ -1,6 +1,15 @@
 Configure your Claude status bars — themes, colours, and animations. $ARGUMENTS
 
-The claude-pulse script is at: [REPLACE_WITH_YOUR_PATH]/claude_status.py
+---
+
+**Finding the script:** Before running any command below, you need the full command to invoke `claude_status.py`. Do this ONCE at the start:
+
+1. Read `~/.claude/settings.json`. Look at `statusLine.command` — if it contains `claude_status.py`, use that entire string as PULSE_CMD (it already includes the correct python binary and full script path).
+2. If `statusLine.command` doesn't exist or doesn't contain `claude_status.py`, try: `python3 "$HOME/.claude-pulse/claude_status.py"` (default install location).
+3. If that file doesn't exist either, try: `python3 "$HOME/.claude/plugins/claude-pulse/claude_status.py"` (plugin install).
+4. If none of the above work, tell the user: "Could not find claude_status.py. Please reinstall with: `curl -fsSL https://raw.githubusercontent.com/NoobyGains/claude-pulse/main/install.sh | sh`"
+
+Save the result as PULSE_CMD. Use `PULSE_CMD` for all commands below (e.g. `PULSE_CMD --theme ocean`).
 
 ---
 
@@ -9,17 +18,17 @@ The claude-pulse script is at: [REPLACE_WITH_YOUR_PATH]/claude_status.py
 ### Direct commands (skip the menu, run immediately):
 
 If $ARGUMENTS matches a **theme name** (`default`, `ocean`, `sunset`, `mono`, `neon`, `pride`, `frost`, `ember`, `candy`, `rainbow`):
--> Run `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --theme <name>` directly, no menu.
+-> Run `PULSE_CMD --theme <name>` directly, no menu.
 -> Confirm: "Theme set to **<name>**. The status line will update on the next refresh."
 
 If $ARGUMENTS is `config` or `settings`:
--> Run `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --config` silently.
+-> Run `PULSE_CMD --config` silently.
 -> Summarise the settings in your response text (don't show raw ANSI output).
 
 If $ARGUMENTS is exactly `show` (no parts after it), or `show all`, or `colors`, or `colours`, or `preview`:
 -> Run TWO separate Bash commands (in parallel) so the output is NOT collapsed behind ctrl+o:
-   1. `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --show-themes`
-   2. `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --show-colors`
+   1. `PULSE_CMD --show-themes`
+   2. `PULSE_CMD --show-colors`
 -> IMPORTANT: Show the raw command output DIRECTLY to the user. Do NOT summarise, reformat, or create tables. The commands output coloured ANSI text with live theme previews — the user needs to see the actual coloured bars, not a markdown description of them. Just run the commands and let the output speak for itself.
 -> After both commands, say ONLY: "Press **Ctrl+O** to expand and see the colours."
 
@@ -45,7 +54,7 @@ If $ARGUMENTS matches `max-width <number>` (where number is 20–100):
 -> Run `--max-width <number>` directly.
 -> Confirm: "Max width set to **<number>%** of terminal. The status line will update on the next refresh."
 
-If $ARGUMENTS matches `bar-style <name>` or `style <name>` (where name is `classic`, `block`, `shade`, `pipe`, `dot`, `square`, or `star`):
+If $ARGUMENTS matches `bar-style <name>` or `style <name>` (where name is `classic`, `block`, `shade`, `pipe`, `dot`, `square`, `star`, or `braille`):
 -> Run `--bar-style <name>` directly.
 -> Confirm: "Bar style set to **<name>**. The status line will update on the next refresh."
 
@@ -74,13 +83,13 @@ If $ARGUMENTS matches `weekly-timer-prefix <text>` or `reset-prefix <text>`:
 -> If empty string, confirm: "Weekly timer prefix removed. Reset time will show without a prefix."
 
 If $ARGUMENTS matches `preset <name>` or `minimal` or `default preset`:
--> If $ARGUMENTS is just `minimal`, run `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --preset minimal`
+-> If $ARGUMENTS is just `minimal`, run `PULSE_CMD --preset minimal`
 -> Otherwise extract the preset name and run `--preset <name>`
 -> Show the output including the preview line.
 -> Explain: "This preset configures bar size, layout, and visibility in one step. Use `/pulse default preset` to restore defaults."
 
 If $ARGUMENTS is `update`:
--> Run `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --update` and show the output.
+-> Run `PULSE_CMD --update` and show the output.
 -> After a successful update, remind the user to restart Claude Code to use the new version.
 
 ### Interactive menu (when $ARGUMENTS is empty, `themes`, `theme`, or `menu`):
@@ -91,13 +100,13 @@ First, show the user available quick commands so they know what's possible:
 
 > **Quick commands:** `/pulse show` preview all themes · `/pulse ocean` set a theme · `/pulse config` see settings · `/pulse update` check for updates
 
-Then run `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --config` silently to get the current settings. If the output contains "update available" or similar, also tell the user:
+Then run `PULSE_CMD --config` silently to get the current settings. If the output contains "update available" or similar, also tell the user:
 
 > **A new version of claude-pulse is available!** Run `/pulse update` to get the latest features and fixes.
 
 Then continue with the wizard. If no update is available, skip the update message.
 
-**Step 1:** Run `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --themes-demo` and show the output to the user. This prints all 10 themes with their actual coloured bars so the user can see every option before picking.
+**Step 1:** Run `PULSE_CMD --themes-demo` and show the output to the user. This prints all 10 themes with their actual coloured bars so the user can see every option before picking.
 
 **Step 2:** Show the first `AskUserQuestion` picker (page 1 of 3):
 
@@ -210,7 +219,7 @@ Options:
 
 Apply with `--bar-size <small|small-medium|medium|medium-large|large>`.
 
-**Step 7:** Check extra credits status by running `python "[REPLACE_WITH_YOUR_PATH]/claude_status.py" --config` silently and checking the "Extra Credits" section.
+**Step 7:** Check extra credits status by running `PULSE_CMD --config` silently and checking the "Extra Credits" section.
 
 If credits are **active** (Status: active), ask:
 

@@ -3,7 +3,15 @@
   "theme": "dark",
   "rainbow_bars": true,
   "bar_size": "medium",
+  "text_color": "auto",
+  "bar_style": "classic",
+  "layout": "standard",
   "max_width": 100,
+  "context_format": "percent",
+  "weekly_timer_format": "auto",
+  "clock_format": "12h",
+  "extra_display": "auto",
+  "currency": "\u00a3",
   "show": {
     "session": true,
     "weekly": true,
@@ -15,6 +23,8 @@
     "context": true,
     "update": true,
     "claude_update": true,
-    "weekly_timer": true
+    "weekly_timer": true,
+    "effort": true,
+    "worktree": true
   }
 }

@@ -40,9 +40,12 @@
 - **Session usage** — how much of your current 5-hour block you've used
 - **Time remaining** — countdown until your session resets
 - **Weekly usage** — your 7-day rolling usage across all models
+- **Opus / Sonnet usage** — per-model weekly limits (auto-shows when you have usage)
 - **Context window** — how full Claude's memory/context is (with colour-coded bar)
 - **Username** — your first name (optional, disabled by default — enable with `/pulse show user`)
 - **Model name** — which model is active (Opus 4.6, Sonnet 4.5, etc.)
+- **Effort level** — shows low/med/high/max when Claude Code sets it (v2.1.68+)
+- **Worktree branch** — shows the active worktree branch name (v2.1.69+)
 - **Plan tier** — auto-detected (Pro, Max 5x, Max 20x)
 - **Extra credits** — auto-shows when you have credits enabled in https://claude.ai/settings/usage
 
@@ -76,7 +79,7 @@ The bars change colour based on your usage level so you can tell at a glance how
 | 50-79% | Yellow | Getting warm |
 | 80%+ | Red | Close to the limit |
 
-This applies to all bars — session, weekly, context window, and extra credits.
+This applies to all bars — session, weekly, opus, sonnet, context window, and extra credits.
 
 ### 10 Built-in Themes
 
@@ -100,7 +103,7 @@ python claude_status.py --animate on
 python claude_status.py --animate off
 ```
 
-Animation is purely refresh-based — no hooks, no background processes, no daemons. It works by rendering a new rainbow frame each time Claude Code refreshes the status line (~150ms while active). Animation is **off by default** — enable it via `/pulse` setup or `--animate on`.
+The animation uses Claude Code's **ultrathink rainbow palette** — the same 7-colour spectrum (red, orange, yellow, green, blue, indigo, violet) with smooth interpolation and a breathing shimmer effect. It's purely refresh-based — no hooks, no background processes, no daemons. Each status line refresh renders a new frame (~150ms while active). Animation is **off by default** — enable it via `/pulse` setup or `--animate on`.
 
 ### Context Window & Model Name
 
@@ -111,6 +114,26 @@ Session ━━━━━━━━ 12% 3h 40m | Weekly ━━━━━━━━ 12
 ```
 
 Both are **enabled by default**. The context bar uses the same colour-coded theme as your other bars. Context and model data appear after your first message in a session (Claude Code provides this data via stdin).
+
+### Effort Level
+
+Shows the current reasoning effort level (low/med/high/max) when set by Claude Code v2.1.68+:
+
+```
+Session ━━━━━━━━ 12% 3h 40m | Weekly ━━━━━━━━ 12% | Context ━━━━━━━━ 42% | Max 20x | Opus 4.6 | high
+```
+
+Enabled by default. Hide with `--hide effort`, show with `--show effort`.
+
+### Worktree Branch
+
+When using Claude Code worktrees (v2.1.69+), the active branch name appears on the status line:
+
+```
+Session ━━━━━━━━ 12% 3h 40m | Weekly ━━━━━━━━ 12% | Context ━━━━━━━━ 42% | Max 20x | Opus 4.6 | feature-branch
+```
+
+Enabled by default. Hide with `--hide worktree`, show with `--show worktree`.
 
 ### Text Colour
 
@@ -139,7 +162,7 @@ python claude_status.py --theme ocean
 
 ### Configurable Bar Size
 
-Choose how wide the progress bars appear — from small (4 chars) to large (12 chars), with medium (8 chars) as default:
+Choose how wide the progress bars appear — from small (4 chars) to large (12 chars), with large (12 chars) as default:
 
 ```bash
 python claude_status.py --bar-size small          # ━━━━
@@ -203,6 +226,10 @@ python claude_status.py --weekly-timer-format countdown   # always countdown: 2d
 python claude_status.py --weekly-timer-format date        # always date: Sat 5pm
 python claude_status.py --weekly-timer-format full        # both: Sat 5pm · 2d 5h
 
+# Clock format (default: 12h)
+python claude_status.py --clock-format 12h               # am/pm: Sat 5pm (default)
+python claude_status.py --clock-format 24h               # 24-hour: Sat 17:00
+
 # Change the prefix (default: "R:")
 python claude_status.py --weekly-timer-prefix "Resets:"
 python claude_status.py --weekly-timer-prefix ""          # no prefix
@@ -226,7 +253,7 @@ python claude_status.py --show timer,plan
 python claude_status.py --config
 ```
 
-**Available parts:** `session`, `weekly`, `weekly_timer`, `plan`, `timer`, `extra`, `update`, `claude_update`, `sparkline`, `runway`, `status_message`, `streak`, `user`, `model`, `context`
+**Available parts:** `session`, `weekly`, `opus`, `sonnet`, `weekly_timer`, `plan`, `timer`, `extra`, `update`, `claude_update`, `sparkline`, `runway`, `status_message`, `streak`, `user`, `model`, `context`, `effort`, `worktree`
 
 ### Username Display
 
@@ -243,10 +270,10 @@ Or from Claude Code:
 /pulse hide user
 ```
 
-The username comes from your OAuth profile — only the first name is displayed (e.g., "John Doe" → "John"). It's disabled by default. When enabled, it appears before the model name:
+The username comes from your OAuth profile — only the first name is displayed (e.g., "John Doe" → "John"). It's enabled by default. When enabled, it appears combined with the plan name:
 
 ```
-Session ━━━━━━━━ 12% 3h 40m | Weekly ━━━━━━━━ 12% | John | Opus 4.6
+Session ━━━━━━━━ 12% 3h 40m | Weekly ━━━━━━━━ 12% | John (Pro) | Opus 4.6
 ```
 
 If your name isn't available in the credentials, claude-pulse will fetch it from Anthropic's API (cached with your usage data).
@@ -267,6 +294,7 @@ All the CLI flags below also work as `/pulse` subcommands inside Claude Code:
 /pulse animate off      — disable animation (static colours)
 /pulse bar-size large   — set progress bar width
 /pulse bar-style block  — set bar character style
+/pulse clock-format 24h — set 24-hour clock for weekly reset
 /pulse layout compact   — set text layout
 /pulse text-color cyan  — set text colour to cyan
 /pulse update           — pull the latest version from GitHub
@@ -300,6 +328,7 @@ claude-pulse also checks if a Claude Code update is available by querying the np
 
 - **Single Python file** — no dependencies, no pip install, just Python 3.6+
 - **30-second cache** — API is only called once every 30 seconds, cached responses return instantly. Configurable: set `cache_ttl_seconds` in your config
+- **Rate-limit resilient** — if the API returns 429 (rate limited), pulse falls back to stale cached data instead of showing an error
 - **Zero config needed** — auto-detects your plan and credentials from Claude Code
 - **No hooks or background processes** — animation runs purely on the status line refresh cycle
 
@@ -314,9 +343,32 @@ If you upgrade your plan, just restart Claude Code and it picks up the new tier 
 
 ## Installation
 
-### Option A — Plugin Marketplace
+### Option A — One-liner install (recommended)
 
-> **Coming soon** — claude-pulse has been submitted to the Claude Code Plugin Directory and is pending review. Once accepted, you'll be able to install with the commands below. For now, use **Option B** (manual install).
+```bash
+# Linux/macOS (curl)
+curl -fsSL https://raw.githubusercontent.com/NoobyGains/claude-pulse/main/install.sh | sh
+
+# Linux/macOS (wget)
+wget -qO- https://raw.githubusercontent.com/NoobyGains/claude-pulse/main/install.sh | sh
+
+# Windows PowerShell
+irm https://raw.githubusercontent.com/NoobyGains/claude-pulse/main/install.ps1 | iex
+```
+
+The installer will:
+
+- Clone (or update) `claude-pulse` into `~/.claude-pulse`
+- Run `claude_status.py --install` to configure your status line
+- Install the `/pulse` slash command into `~/.claude/commands/`
+
+Then restart Claude Code and run `/pulse` to configure themes.
+
+> **No git?** The installer falls back to downloading the files directly via curl/wget.
+
+### Option B — Plugin Marketplace
+
+> **Coming soon** — claude-pulse has been submitted to the Claude Code Plugin Directory and is pending review. Once accepted, you'll be able to install with the commands below.
 
 ```
 /plugin marketplace add NoobyGains/claude-pulse
@@ -326,7 +378,7 @@ If you upgrade your plan, just restart Claude Code and it picks up the new tier 
 
 Restart Claude Code. Done! Use `/claude-pulse:pulse` to configure themes.
 
-### Option B — Manual Install (recommended for now)
+### Option C — Manual Install
 
 #### 1. Clone the repo
 
@@ -399,13 +451,14 @@ Edit `config.json` directly or use the CLI flags:
   "animate": false,
   "text_color": "auto",
   "currency": "£",
-  "bar_size": "medium",
+  "bar_size": "large",
   "bar_style": "classic",
   "layout": "standard",
   "context_format": "percent",
   "extra_display": "auto",
   "weekly_timer_format": "auto",
   "weekly_timer_prefix": "R:",
+  "clock_format": "12h",
   "show": {
     "session": true,
     "weekly": true,
@@ -420,7 +473,9 @@ Edit `config.json` directly or use the CLI flags:
     "status_message": false,
     "streak": false,
     "model": true,
-    "context": true
+    "context": true,
+    "effort": true,
+    "worktree": true
   }
 }
 ```
@@ -447,6 +502,7 @@ Edit `config.json` directly or use the CLI flags:
 | `--extra-display <auto\|full\|amount>` | Extra credits display mode (default: auto) |
 | `--weekly-timer-format <mode>` | Weekly reset display: auto, countdown, date, full |
 | `--weekly-timer-prefix <text>` | Prefix before reset time (default: `R:`) |
+| `--clock-format <12h\|24h>` | Clock format for weekly reset time (default: 12h) |
 | `--update` | Pull the latest version from GitHub (shows changelog) |
 | `--config` | Print current configuration summary |
 
@@ -476,6 +532,8 @@ No API key required — claude-pulse uses your existing Claude Code login (OAuth
 | Problem | Solution |
 |---------|----------|
 | Status line doesn't appear | Run `python claude_status.py --install` and restart Claude Code |
+| No output at all (blank) | If you migrated Claude Code from npm to native installer, run `/pulse update` to get the fix. Old npm files in `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code` were causing silent suppression |
+| Status line missing on Windows (v2.1.47+) | Re-run `python claude_status.py --install` — recent Claude Code versions require `$HOME` and forward slashes in paths. The installer now handles this automatically. See [#27057](https://github.com/anthropics/claude-code/issues/27057) |
 | Shows "No credentials found" | Make sure you're logged in to Claude Code (`claude /login`) |
 | Shows wrong plan tier after upgrading | Log out (`claude /logout`) then log back in (`claude /login`) — your OAuth token needs to refresh to pick up the new subscription tier |
 | Stale percentages | Delete the cache: `~/.cache/claude-status/cache.json` (Linux/Mac) or `%LOCALAPPDATA%\claude-status\cache.json` (Windows) |
@@ -499,11 +557,12 @@ Change the visual appearance of the progress bars:
 | `dot` | ● | ○ | Round dots |
 | `square` | ■ | □ | Filled/hollow squares |
 | `star` | ★ | ☆ | Stars |
+| `braille` | ⣿ | ⣀ | Smooth gradient (7 levels per char) |
 
 ```bash
 python claude_status.py --bar-style classic
 python claude_status.py --bar-style block
-python claude_status.py --bar-style dot
+python claude_status.py --bar-style braille
 ```
 
 Bar styles work with all themes, sizes, and animations.
