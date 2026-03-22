@@ -1511,6 +1511,23 @@ def _calc_pace_pct(resets_at_str, window_seconds):
         return None
 
 
+def _pace_indicator(pct, pace):
+    """Return a colored pace arrow comparing usage % vs elapsed time %
+
+    ↓ (green) = under pace, ↑ (red) = over pace, - = on track.
+    Threshold: within 5% difference is considered on track.
+    """
+    if pace is None:
+        return ""
+    diff = pct - pace
+    if diff < -5:
+        return f" {GREEN}\u2193{RESET}"
+    elif diff > 5:
+        return f" {RED}\u2191{RESET}"
+    else:
+        return " -"
+
+
 def format_reset_time(resets_at_str):
     if not resets_at_str:
         return None
@@ -2408,7 +2425,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
             reset = format_reset_time(five.get("resets_at")) if show.get("timer", True) else None
             reset_str = f" {reset}" if reset else ""
             pace = _calc_pace_pct(five.get("resets_at"), 18000)
-            pace_str = f" ({pace:.0f}%)" if pace is not None else ""
+            pace_str = _pace_indicator(pct, pace)
             if layout == "compact":
                 parts.append(f"S {bar} {pct:.0f}%{pace_str}{reset_str}")
             elif layout == "minimal":
@@ -2470,7 +2487,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
                 if wr:
                     weekly_reset_str = f" {wt_prefix}{wr}"
             pace = _calc_pace_pct(seven.get("resets_at"), 604800)
-            pace_str = f" ({pace:.0f}%)" if pace is not None else ""
+            pace_str = _pace_indicator(pct, pace)
             if layout == "compact":
                 parts.append(f"W {bar} {pct:.0f}%{pace_str}{weekly_reset_str}")
             elif layout == "minimal":
@@ -2502,7 +2519,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
             pct = sonnet.get("utilization") or 0
             bar = make_bar(pct, theme, plain=bar_plain, width=bw, bar_style=bstyle)
             pace = _calc_pace_pct(sonnet.get("resets_at"), 604800)
-            pace_str = f" ({pace:.0f}%)" if pace is not None else ""
+            pace_str = _pace_indicator(pct, pace)
             if layout == "compact":
                 parts.append(f"S {bar} {pct:.0f}%{pace_str}")
             elif layout == "minimal":
