@@ -170,7 +170,7 @@ CELEBRATION_DROP_THRESHOLD = 20.0
 CELEBRATION_CHAR = "\u2726"  # ✦
 
 # ---------------------------------------------------------------------------
-# Multi-session / Pomodoro / Git drift constants
+# Multi-session / Focus / Git drift constants
 # ---------------------------------------------------------------------------
 SESSION_STALE_SECONDS = 300
 SESSION_DIR_NAME = "sessions"
@@ -2760,7 +2760,7 @@ def _get_active_sessions():
 
 
 # ---------------------------------------------------------------------------
-# Pomodoro timer
+# Focus timer
 # ---------------------------------------------------------------------------
 
 def _get_pomodoro_path():
@@ -2834,7 +2834,7 @@ def cmd_pomodoro(action, minutes=None):
                 utf8_print(f"Invalid duration: {_sanitize(str(minutes))}")
                 return
         _write_pomodoro({"start": time.time(), "duration_minutes": duration, "active": True})
-        utf8_print(f"{BRIGHT_GREEN}Pomodoro started: {duration} minutes{RESET}")
+        utf8_print(f"{BRIGHT_GREEN}Focus started: {duration} minutes{RESET}")
         utf8_print(f"  Focus timer will appear in your status line.")
         utf8_print(f"  Stop with: --focus stop")
     elif action == "stop":
@@ -2842,7 +2842,7 @@ def cmd_pomodoro(action, minutes=None):
         if pomo and pomo.get("active"):
             pomo["active"] = False
             _write_pomodoro(pomo)
-            utf8_print("Pomodoro stopped.")
+            utf8_print("Focus stopped.")
         else:
             utf8_print("No active pomodoro timer.")
     elif action == "status":
@@ -2853,14 +2853,14 @@ def cmd_pomodoro(action, minutes=None):
             return
         remaining, is_break = _pomodoro_remaining(pomo)
         if remaining <= 0:
-            utf8_print("Pomodoro timer has expired.")
+            utf8_print("Focus timer has expired.")
             return
         remaining_min = int(remaining / 60) + (1 if remaining % 60 > 0 else 0)
         if is_break:
             utf8_print(f"\u2615 Break time! {remaining_min}m remaining")
         else:
             elapsed_min = int((time.time() - pomo.get("start", 0)) / 60)
-            utf8_print(f"{BOLD}Pomodoro:{RESET} {elapsed_min}m / {pomo.get('duration_minutes', 25)}m elapsed, {remaining_min}m remaining")
+            utf8_print(f"{BOLD}Focus:{RESET} {elapsed_min}m / {pomo.get('duration_minutes', 25)}m elapsed, {remaining_min}m remaining")
     else:
         utf8_print(f"Usage: --focus start [minutes] | stop | status")
 
@@ -3338,7 +3338,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, cache_age=None):
         except Exception:
             pass
 
-    # Pomodoro timer
+    # Focus timer
     if show.get("pomodoro", True):
         try:
             pomo = _read_pomodoro()
