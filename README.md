@@ -201,21 +201,23 @@ Set with `--animate <mode>`. Animation moves on each status line refresh (intera
 
 ## Security
 
-- OAuth tokens only sent to `api.anthropic.com` (hardcoded allowlist)
+- **No API calls for usage data** — reads rate limits directly from Claude Code's stdin (v2.1.80+)
+- OAuth tokens only used as fallback for extra credits/per-model caps, sent only to `api.anthropic.com` (hardcoded allowlist)
 - All file writes use atomic operations with 0o600 permissions
-- ANSI escape injection prevention on all API/external data
+- ANSI escape injection prevention on all external data
 - No `shell=True` in any subprocess call
-- Exchange rate API (frankfurter.app) — no auth, read-only
+- Exchange rate API (frankfurter.app) — no auth, read-only, cached 24h
 
 ## Troubleshooting
 
 | Issue | Fix |
 |---|---|
 | No status line visible | Run `--install` then restart Claude Code |
-| "Rate limited" message | Update to latest — stdin rate limits bypass the API entirely |
-| Heartbeat not showing | Run `--install-hooks` then restart Claude Code |
-| Settings error after hook install | Run `/doctor` — ensure hooks use the nested format |
-| Stale data | Check `--config` for cache TTL, or wait for next refresh |
+| "Rate limited" message | Update to v3.0.0+ — reads from stdin, no API calls needed |
+| Heartbeat not showing | Run `--install-hooks` then restart Claude Code. Shows after first tool call |
+| Heartbeat appears/disappears | Normal — shows when hook state is fresh (within 5 min of last tool call) |
+| Settings error after hook install | Run `/doctor` — hooks need nested format: `{matcher, hooks: [{type, command}]}` |
+| Stale data showing | Data refreshes on every interaction. If idle, it shows the last known state |
 | Unicode characters broken | Try `--bar-style block` for better Windows terminal support |
 
 ## Support
