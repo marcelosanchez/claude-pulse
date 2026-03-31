@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal Claude Code status line — fetches real usage data from Anthropic's OAuth API."""
+"""Claude Code status line — reads usage data from Claude Code's stdin and displays real-time bars."""
 
 VERSION = "3.0.0"
 
