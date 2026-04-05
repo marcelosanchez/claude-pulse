@@ -60,6 +60,7 @@ Session ━━━───────── 27% 2h 53m | Weekly ━━━━━
 | **5 animation modes** | off, rainbow, pulse, glow, shift — each visually distinct |
 | **8 bar styles** | classic, block, shade, pipe, dot, square, star, braille |
 | **Lines changed** | Shows `+42 -7` in green/red — lines added and removed this session, read from stdin |
+| **Cumulative cost** | Opt-in widget showing total API-equivalent cost across all sessions (cached, 5-min refresh) |
 | **Widget priorities** | Every widget has a priority number — reorder them with `--priority model=5,cost=15` |
 | **Focus timer** | Built-in focus timer — `--focus start 25` shows countdown in the status bar |
 | **Auto-updates** | Notifies when a new version of claude-pulse or Claude Code is available |
@@ -144,6 +145,7 @@ Use `/pulse` in Claude Code for an interactive setup wizard, or configure direct
 --show lines               # Show +N/-N lines changed
 --show burn_rate           # Show usage velocity (↑3%/hr)
 --show git_drift           # Show commits ahead/behind
+--show cumulative_cost     # Show total API-equivalent cost across all sessions
 --show files_changed       # Show modified file count
 --show last_tool           # Show last tool Claude used
 --hide cost                # Hide cost ticker
@@ -178,7 +180,8 @@ Use `/pulse` in Claude Code for an interactive setup wizard, or configure direct
 │  on every tool call                           │
 ├───────────────────────────────────────────────┤
 │  Cache Layer                                  │
-│  Exchange rates (24h) · hook state (5m)       │
+│  Exchange rates (24h) · cumulative cost (5m)  │
+│  hook state (5m)                              │
 │  Animation state · usage history              │
 └───────────────────────────────────────────────┘
 ```

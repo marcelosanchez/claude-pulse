@@ -136,6 +136,34 @@ MODEL_CONTEXT_WINDOWS = {
 }
 DEFAULT_CONTEXT_WINDOW = 200_000
 
+# API pricing per million tokens (USD) — updated 2025
+# https://docs.anthropic.com/en/docs/about-claude/pricing
+API_PRICING = {
+    "claude-opus-4-6": {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_write": 18.75},
+    "claude-opus-4": {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_write": 18.75},
+    "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+    "claude-sonnet-4-5": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+    "claude-sonnet-4": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
+    "claude-haiku-4-5": {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
+    "claude-3-5-sonnet": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+    "claude-3-5-haiku": {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
+    "claude-3-opus": {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_write": 18.75},
+}
+# Display names for pricing table
+API_PRICING_DISPLAY = {
+    "claude-opus-4-6": "Opus 4.6",
+    "claude-opus-4": "Opus 4",
+    "claude-sonnet-4-6": "Sonnet 4.6",
+    "claude-sonnet-4-5": "Sonnet 4.5",
+    "claude-sonnet-4": "Sonnet 4",
+    "claude-haiku-4-5-20251001": "Haiku 4.5",
+    "claude-haiku-4-5": "Haiku 4.5",
+    "claude-3-5-sonnet": "Sonnet 3.5",
+    "claude-3-5-haiku": "Haiku 3.5",
+    "claude-3-opus": "Opus 3",
+}
+
 # ---------------------------------------------------------------------------
 # Hook infrastructure constants
 # ---------------------------------------------------------------------------
@@ -349,7 +377,7 @@ THEME_TEXT_DEFAULTS = {
 # Users can override via config["widget_priority"] = {"session": 1, "weekly": 2, ...}
 WIDGET_PRIORITY = {
     "session": 10, "weekly": 20, "opus": 30, "sonnet": 40, "extra": 50,
-    "context": 60, "cost": 70, "lines": 75, "peak": 80, "plan": 90,
+    "context": 60, "cost": 70, "cumulative_cost": 72, "lines": 75, "peak": 80, "plan": 90,
     "streak": 100, "model": 110, "effort": 120, "worktree": 130,
     "heartbeat": 140, "activity": 150, "last_tool": 160, "branch": 170,
     "sessions": 180, "pomodoro": 190, "git_drift": 200, "files_changed": 210,
@@ -383,6 +411,7 @@ DEFAULT_SHOW = {
     "staleness": True,
     "lines": True,
     # Hidden by default — opt-in with --show
+    "cumulative_cost": False,
     "burn_rate": False,
     "sessions": False,
     "last_tool": False,
@@ -777,6 +806,59 @@ def _migrate_config_from_cache():
             pass
 
 
+def _detect_default_currency():
+    """Auto-detect currency symbol from system locale/timezone."""
+    import locale as _locale
+
+    # Try locale-based detection
+    country = ""
+    try:
+        # getdefaultlocale deprecated in 3.13 but still works on Windows
+        loc = _locale.getdefaultlocale()[0] or ""
+        if "_" in loc:
+            country = loc.split("_")[-1].upper()
+    except (ValueError, AttributeError):
+        pass
+    if not country:
+        try:
+            loc = _locale.getlocale()[0] or ""
+            if "_" in loc:
+                country = loc.split("_")[-1].upper()
+        except (ValueError, AttributeError):
+            pass
+
+    _COUNTRY_CURRENCY = {
+        "GB": "\u00a3", "UK": "\u00a3",
+        "US": "$",
+        "DE": "\u20ac", "FR": "\u20ac", "IT": "\u20ac", "ES": "\u20ac", "NL": "\u20ac",
+        "BE": "\u20ac", "AT": "\u20ac", "IE": "\u20ac", "FI": "\u20ac", "PT": "\u20ac", "GR": "\u20ac",
+        "JP": "\u00a5",
+        "CA": "C$", "AU": "A$", "NZ": "NZ$",
+        "CH": "Fr", "SE": "kr", "NO": "kr", "DK": "kr",
+        "IN": "\u20b9", "KR": "\u20a9", "BR": "R$", "ZA": "R",
+        "PL": "z\u0142", "CZ": "K\u010d", "TR": "\u20ba", "IL": "\u20aa",
+        "SG": "S$", "HK": "HK$", "MX": "$",
+    }
+
+    if country in _COUNTRY_CURRENCY:
+        return _COUNTRY_CURRENCY[country]
+
+    # Fallback: timezone-based detection
+    try:
+        import datetime as _dt
+        tz_name = _dt.datetime.now(_dt.timezone.utc).astimezone().tzinfo.tzname(None) or ""
+        if tz_name in ("GMT", "BST"):
+            return "\u00a3"
+        if tz_name in ("CET", "CEST"):
+            return "\u20ac"
+        if tz_name == "JST":
+            return "\u00a5"
+    except Exception:
+        pass
+
+    return "$"
+
+
 def load_config():
     _migrate_config_from_cache()
     user_path = get_config_path()
@@ -813,6 +895,8 @@ def load_config():
     data.setdefault("layout", DEFAULT_LAYOUT)
     data.setdefault("context_format", "percent")
     data.setdefault("extra_display", "auto")
+    if "currency" not in data:
+        data["currency"] = _detect_default_currency()
     peak = data.get("peak_hours", {})
     peak.setdefault("enabled", True)
     peak.setdefault("start", "13:00")
@@ -1666,7 +1750,9 @@ def bar_colour(pct, theme):
 
 
 def _fmt_tokens(n):
-    """Format token count: 200000 -> '200k', 1000000 -> '1M'."""
+    """Format token count: 200000 -> '200k', 1000000 -> '1M', 1B -> '1B'."""
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.0f}B" if n % 1_000_000_000 == 0 else f"{n / 1_000_000_000:.1f}B"
     if n >= 1_000_000:
         return f"{n / 1_000_000:.0f}M" if n % 1_000_000 == 0 else f"{n / 1_000_000:.1f}M"
     if n >= 1_000:
@@ -2147,7 +2233,7 @@ def _format_cost(stdin_ctx, config):
         cost_val = float(cost_usd)
     except (ValueError, TypeError):
         return ""
-    currency = _sanitize(config.get("currency", "\u00a3"))[:5]
+    currency = _sanitize(config.get("currency", "$"))[:5]
     rate, code = _get_exchange_rate(currency)
     converted = cost_val * rate
     if code == "USD":
@@ -2466,6 +2552,156 @@ def _get_streak_display(config, stats):
     return f"{streak}d streak"
 
 
+_CUMULATIVE_COST_CACHE_TTL = 300  # 5 minutes
+
+
+def _get_cached_cumulative_cost():
+    """Return cumulative cost data with a 5-minute disk cache to avoid rescanning JSONL on every refresh."""
+    cache_path = get_state_dir() / "cumulative_cost_cache.json"
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if time.time() - cached.get("timestamp", 0) < _CUMULATIVE_COST_CACHE_TTL:
+            return cached.get("data", {})
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+    data = _scan_session_costs()
+    try:
+        _atomic_json_write(cache_path, {"timestamp": time.time(), "data": data}, indent=None)
+    except OSError:
+        pass
+    return data
+
+
+def _scan_session_costs():
+    """Scan all Claude Code session JSONL transcripts and calculate API-equivalent costs.
+
+    Returns a dict with per-model cost/token breakdown, totals, session count,
+    and the earliest file mtime seen.
+    """
+    home = Path.home()
+    projects_dir = home / ".claude" / "projects"
+
+    models: dict = {}
+    total_cost_usd = 0.0
+    total_tokens = 0
+    session_count = 0
+    first_seen_ts = None
+
+    if not projects_dir.exists():
+        return {
+            "models": {},
+            "total_cost_usd": 0.0,
+            "total_tokens": 0,
+            "session_count": 0,
+            "first_seen": None,
+        }
+
+    try:
+        jsonl_files = list(projects_dir.rglob("*.jsonl"))
+    except (OSError, PermissionError):
+        jsonl_files = []
+
+    for jsonl_path in jsonl_files:
+        # Count sessions: top-level JSONL files only (not inside subagents/ dirs)
+        path_parts = jsonl_path.parts
+        is_subagent = any(p == "subagents" for p in path_parts)
+        if not is_subagent:
+            session_count += 1
+
+        # Track earliest file mtime
+        try:
+            mtime = jsonl_path.stat().st_mtime
+            if first_seen_ts is None or mtime < first_seen_ts:
+                first_seen_ts = mtime
+        except OSError:
+            pass
+
+        # Parse each line
+        try:
+            with open(jsonl_path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    try:
+                        if entry.get("type") != "assistant":
+                            continue
+                        msg = entry.get("message", {})
+                        usage = msg.get("usage", {})
+                        if not usage or "input_tokens" not in usage:
+                            continue
+                        model_id = msg.get("model", "")
+                        # Normalise: strip version suffix variants for matching
+                        # e.g. "claude-sonnet-4-5-20251022" → "claude-sonnet-4-5"
+                        pricing = API_PRICING.get(model_id)
+                        if pricing is None:
+                            # Try prefix match (handles dated variants)
+                            for key in API_PRICING:
+                                if model_id.startswith(key):
+                                    pricing = API_PRICING[key]
+                                    model_id = key
+                                    break
+                        if pricing is None:
+                            continue
+
+                        inp = int(usage.get("input_tokens") or 0)
+                        out = int(usage.get("output_tokens") or 0)
+                        cr = int(usage.get("cache_read_input_tokens") or 0)
+                        cw = int(usage.get("cache_creation_input_tokens") or 0)
+
+                        cost = (
+                            inp * pricing["input"]
+                            + out * pricing["output"]
+                            + cr * pricing["cache_read"]
+                            + cw * pricing["cache_write"]
+                        ) / 1_000_000
+
+                        if model_id not in models:
+                            models[model_id] = {
+                                "cost_usd": 0.0,
+                                "total_tokens": 0,
+                                "input": 0,
+                                "output": 0,
+                                "cache_read": 0,
+                                "cache_write": 0,
+                            }
+                        m = models[model_id]
+                        m["cost_usd"] += cost
+                        m["input"] += inp
+                        m["output"] += out
+                        m["cache_read"] += cr
+                        m["cache_write"] += cw
+                        m["total_tokens"] += inp + out + cr + cw
+                        total_cost_usd += cost
+                        total_tokens += inp + out + cr + cw
+                    except (AttributeError, KeyError, TypeError, ValueError):
+                        continue
+        except (OSError, PermissionError):
+            continue
+
+    first_seen_str = None
+    if first_seen_ts is not None:
+        try:
+            from datetime import date as _date
+            first_seen_str = _date.fromtimestamp(first_seen_ts).isoformat()
+        except (OSError, ValueError, OverflowError):
+            pass
+
+    return {
+        "models": models,
+        "total_cost_usd": total_cost_usd,
+        "total_tokens": total_tokens,
+        "session_count": session_count,
+        "first_seen": first_seen_str,
+    }
+
+
 def cmd_stats():
     """Show full session stats summary."""
     stats = _load_stats()
@@ -2483,6 +2719,74 @@ def cmd_stats():
     if milestone:
         utf8_print(f"  Milestone:      {BRIGHT_YELLOW}{milestone}{RESET}")
     utf8_print("")
+
+    # --- API-equivalent cost section ---
+    import sys as _sys
+    _sys.stdout.buffer.write(f"{DIM}  Scanning sessions...{RESET}\r".encode("utf-8"))
+    _sys.stdout.buffer.flush()
+    cost_data = _scan_session_costs()
+    _sys.stdout.buffer.write(b"                        \r")
+    _sys.stdout.buffer.flush()
+
+    config = load_config()
+    currency_sym = config.get("currency", "$")
+    rate, _code = _get_exchange_rate(currency_sym)
+
+    model_rows = sorted(
+        [(mid, mdata) for mid, mdata in cost_data["models"].items() if mdata["cost_usd"] > 0],
+        key=lambda x: x[1]["cost_usd"],
+        reverse=True,
+    )
+
+    if model_rows:
+        utf8_print(f"  {BOLD}API-equivalent cost:{RESET}")
+        # Find longest display name for alignment
+        display_names = [API_PRICING_DISPLAY.get(mid, mid) for mid, _ in model_rows]
+        max_name_len = max(len(n) for n in display_names)
+
+        for (mid, mdata), dname in zip(model_rows, display_names):
+            local_cost = mdata["cost_usd"] * rate
+            cost_str = f"{currency_sym}{local_cost:,.2f}"
+            tok_str = (
+                f"{_fmt_tokens(mdata['input'])} in"
+                f" \u00b7 {_fmt_tokens(mdata['output'])} out"
+                f" \u00b7 {_fmt_tokens(mdata['cache_read'] + mdata['cache_write'])} cached"
+            )
+            pad = max_name_len - len(dname)
+            utf8_print(
+                f"    {BRIGHT_WHITE}{dname}:{RESET}{' ' * pad}  "
+                f"{BRIGHT_YELLOW}{cost_str:<12}{RESET}{DIM}({tok_str}){RESET}"
+            )
+
+        utf8_print(f"    {DIM}{'\u2500' * 33}{RESET}")
+        total_local = cost_data["total_cost_usd"] * rate
+        utf8_print(f"    {'Total:':<{max_name_len + 2}}  {BOLD}{BRIGHT_YELLOW}{currency_sym}{total_local:,.2f}{RESET}")
+        utf8_print("")
+
+        # Subscription value vs $200/month Max plan
+        first_seen = cost_data.get("first_seen")
+        months_active = 1.0
+        if first_seen:
+            try:
+                from datetime import date as _date2
+                import datetime as _dt2
+                fs = _date2.fromisoformat(first_seen)
+                today_d = _date2.today()
+                delta_days = (today_d - fs).days
+                months_active = max(delta_days / 30.44, 1.0)
+            except (ValueError, TypeError):
+                pass
+
+        subscription_ref_usd = 200.0 * months_active
+        if subscription_ref_usd > 0:
+            ratio = cost_data["total_cost_usd"] / subscription_ref_usd
+            utf8_print(
+                f"  {DIM}Subscription value: ~{RESET}{BRIGHT_GREEN}{ratio:.1f}x{RESET}"
+                f"{DIM} vs API pricing ({months_active:.1f} months \u00d7 $200/mo Max){RESET}"
+            )
+        utf8_print("")
+    else:
+        utf8_print(f"  {DIM}No session transcript data found for cost analysis.{RESET}\n")
 
 
 def _parse_stdin_context(raw_stdin):
@@ -2563,7 +2867,7 @@ def _parse_stdin_context(raw_stdin):
         rl = data.get("data", data).get("rate_limits", {})
         if rl:
             result["_rate_limits"] = {}
-            for window in ("five_hour", "seven_day"):
+            for window in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
                 w = rl.get(window)
                 if w and w.get("used_percentage") is not None:
                     # Convert Unix epoch seconds to ISO string for compatibility
@@ -3191,6 +3495,17 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, cache_age=None):
                 parts.append((_sn, f"{pct:.0f}%{pace_str} {bar}"))
             else:
                 parts.append((_sn, f"Sonnet {bar} {pct:.0f}%{pace_str}"))
+        else:
+            bar = make_bar(0, theme, plain=bar_plain, width=bw, bar_style=bstyle)
+            _sn = _pri("sonnet")
+            if layout == "compact":
+                parts.append((_sn, f"S {bar} 0%"))
+            elif layout == "minimal":
+                parts.append((_sn, f"{bar} 0%"))
+            elif layout == "percent-first":
+                parts.append((_sn, f"0% {bar}"))
+            else:
+                parts.append((_sn, f"Sonnet {bar} 0%"))
 
     # Extra usage (bonus/gifted credits)
     extra = usage.get("extra_usage")
@@ -3199,7 +3514,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, cache_age=None):
     extra_has_credits = extra and extra.get("is_enabled") and (extra.get("monthly_limit") or 0) > 0
     if extra_enabled_by_user or (extra_has_credits and not extra_explicitly_hidden):
         _e = _pri("extra")
-        currency = _sanitize(config.get("currency", "\u00a3"))[:5]
+        currency = _sanitize(config.get("currency", "$"))[:5]
         if extra and extra.get("is_enabled"):
             pct = min(extra.get("utilization") or 0, 100)
             used = (extra.get("used_credits") or 0) / 100
@@ -3225,11 +3540,12 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, cache_age=None):
                 else:
                     parts.append((_e, f"Extra {bar} {currency}{used:.2f}/{currency}{limit:.2f}"))
         elif extra_enabled_by_user:
-            bar = make_bar(0, theme, plain=bar_plain, width=bw, bar_style=bstyle)
             if layout == "minimal":
-                parts.append((_e, f"{bar} none"))
+                parts.append((_e, "n/a"))
+            elif layout == "compact":
+                parts.append((_e, "E: n/a"))
             else:
-                parts.append((_e, f"Extra {bar} none"))
+                parts.append((_e, "Extra: n/a"))
 
     # Context window usage from stdin context (with pressure warning)
     if stdin_ctx and show.get("context", True):
@@ -3274,6 +3590,20 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, cache_age=None):
         cost_str = _format_cost(stdin_ctx, config)
         if cost_str:
             parts.append((_pri("cost"), cost_str))
+
+    # Cumulative API-equivalent cost (opt-in, off by default)
+    if show.get("cumulative_cost", False):
+        try:
+            cost_data = _get_cached_cumulative_cost()
+            total_usd = cost_data.get("total_cost_usd", 0.0)
+            if total_usd > 0:
+                currency = _sanitize(config.get("currency", "$"))[:5]
+                rate, code = _get_exchange_rate(currency)
+                total_local = total_usd * rate
+                sym = "$" if code == "USD" else currency
+                parts.append((_pri("cumulative_cost"), f"{DIM}All:{RESET} {sym}{total_local:,.2f}"))
+        except Exception:
+            pass
 
     # Lines changed (from stdin cost data)
     if stdin_ctx and show.get("lines", True):
@@ -3834,7 +4164,7 @@ def cmd_print_config():
             _usage = fetch_usage(token)
             _extra = _usage.get("extra_usage")
             if _extra and _extra.get("is_enabled"):
-                currency = config.get("currency", "\u00a3")
+                currency = config.get("currency", "$")
                 used = (_extra.get("used_credits") or 0) / 100  # API returns pence/cents
                 limit = (_extra.get("monthly_limit") or 0) / 100
                 pct = min(_extra.get("utilization") or 0, 100)
@@ -4470,13 +4800,30 @@ def main():
             usage_from_stdin["seven_day"] = stdin_rl["seven_day"]
 
         # Merge with cached API data for extra/opus/sonnet if available
+        has_model_caps = False
         if cached and "usage" in cached:
             for key in ("extra_usage", "seven_day_opus", "seven_day_sonnet"):
                 if key in cached["usage"]:
                     usage_from_stdin[key] = cached["usage"][key]
+                    has_model_caps = True
             plan_from_cache = cached.get("plan", "")
         else:
             plan_from_cache = ""
+
+        # If no per-model data cached, fetch from API once to populate it
+        if not has_model_caps:
+            try:
+                token, api_plan = get_credentials()
+                if token:
+                    api_usage = fetch_usage(token)
+                    for key in ("extra_usage", "seven_day_opus", "seven_day_sonnet"):
+                        if key in api_usage:
+                            usage_from_stdin[key] = api_usage[key]
+                    if api_plan:
+                        plan_from_cache = api_plan
+                    write_cache(cache_path, "", usage=api_usage, plan=plan_from_cache)
+            except Exception:
+                pass
 
         # Get plan from credentials (lightweight, no API call)
         if not plan_from_cache:
