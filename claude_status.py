@@ -14,7 +14,7 @@ import sys
 import time
 import urllib.request
 import urllib.error
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -845,15 +845,14 @@ def _detect_default_currency():
 
     # Fallback: timezone-based detection
     try:
-        import datetime as _dt
-        tz_name = _dt.datetime.now(_dt.timezone.utc).astimezone().tzinfo.tzname(None) or ""
+        tz_name = datetime.now(timezone.utc).astimezone().tzinfo.tzname(None) or ""
         if tz_name in ("GMT", "BST"):
             return "\u00a3"
         if tz_name in ("CET", "CEST"):
             return "\u20ac"
         if tz_name == "JST":
             return "\u00a5"
-    except Exception:
+    except (AttributeError, OSError):
         pass
 
     return "$"
@@ -2183,20 +2182,31 @@ _CURRENCY_TO_CODE = {
 }
 
 
+_exchange_rate_mem = {}  # in-memory cache: {code: (rate, timestamp)}
+
+
 def _get_exchange_rate(currency_symbol):
     """Get USD→target exchange rate. Cached for 24h. Returns (rate, code) or (1.0, 'USD')."""
     code = _CURRENCY_TO_CODE.get(currency_symbol, "")
     if not code or code == "USD":
         return 1.0, "USD"
 
-    # Check cache
+    # In-memory cache (avoids disk I/O on hot path)
+    now = time.time()
+    mem = _exchange_rate_mem.get(code)
+    if mem and now - mem[1] < _EXCHANGE_RATE_TTL:
+        return mem[0], code
+
+    # Check disk cache
     cache_path = get_state_dir() / "exchange_rate.json"
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             cached = json.load(f)
-        if (time.time() - cached.get("timestamp", 0) < _EXCHANGE_RATE_TTL
+        if (now - cached.get("timestamp", 0) < _EXCHANGE_RATE_TTL
                 and code in cached.get("rates", {})):
-            return cached["rates"][code], code
+            rate = cached["rates"][code]
+            _exchange_rate_mem[code] = (rate, now)
+            return rate, code
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
 
@@ -2216,12 +2226,15 @@ def _get_exchange_rate(currency_symbol):
                 }, indent=None)
             except OSError:
                 pass
+            _exchange_rate_mem[code] = (float(rate), now)
             return float(rate), code
     except Exception:
         pass
 
     # Fallback to hardcoded rate
-    return _FALLBACK_RATES.get(code, 1.0), code
+    fallback = _FALLBACK_RATES.get(code, 1.0)
+    _exchange_rate_mem[code] = (fallback, now)
+    return fallback, code
 
 
 def _format_cost(stdin_ctx, config):
@@ -2553,22 +2566,34 @@ def _get_streak_display(config, stats):
 
 
 _CUMULATIVE_COST_CACHE_TTL = 300  # 5 minutes
+_cumulative_cost_mem = {"ts": 0, "data": {}}
 
 
 def _get_cached_cumulative_cost():
-    """Return cumulative cost data with a 5-minute disk cache to avoid rescanning JSONL on every refresh."""
+    """Return cumulative cost data with in-memory + 5-minute disk cache."""
+    now = time.time()
+
+    # In-memory cache (avoids disk I/O on hot path)
+    if now - _cumulative_cost_mem["ts"] < _CUMULATIVE_COST_CACHE_TTL:
+        return _cumulative_cost_mem["data"]
+
+    # Disk cache
     cache_path = get_state_dir() / "cumulative_cost_cache.json"
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             cached = json.load(f)
-        if time.time() - cached.get("timestamp", 0) < _CUMULATIVE_COST_CACHE_TTL:
-            return cached.get("data", {})
+        if now - cached.get("timestamp", 0) < _CUMULATIVE_COST_CACHE_TTL:
+            _cumulative_cost_mem["ts"] = now
+            _cumulative_cost_mem["data"] = cached.get("data", {})
+            return _cumulative_cost_mem["data"]
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
 
     data = _scan_session_costs()
+    _cumulative_cost_mem["ts"] = now
+    _cumulative_cost_mem["data"] = data
     try:
-        _atomic_json_write(cache_path, {"timestamp": time.time(), "data": data}, indent=None)
+        _atomic_json_write(cache_path, {"timestamp": now, "data": data}, indent=None)
     except OSError:
         pass
     return data
@@ -2599,7 +2624,7 @@ def _scan_session_costs():
         }
 
     try:
-        jsonl_files = list(projects_dir.rglob("*.jsonl"))
+        jsonl_files = projects_dir.rglob("*.jsonl")
     except (OSError, PermissionError):
         jsonl_files = []
 
@@ -2688,8 +2713,7 @@ def _scan_session_costs():
     first_seen_str = None
     if first_seen_ts is not None:
         try:
-            from datetime import date as _date
-            first_seen_str = _date.fromtimestamp(first_seen_ts).isoformat()
+            first_seen_str = date.fromtimestamp(first_seen_ts).isoformat()
         except (OSError, ValueError, OverflowError):
             pass
 
@@ -2721,15 +2745,14 @@ def cmd_stats():
     utf8_print("")
 
     # --- API-equivalent cost section ---
-    import sys as _sys
-    _sys.stdout.buffer.write(f"{DIM}  Scanning sessions...{RESET}\r".encode("utf-8"))
-    _sys.stdout.buffer.flush()
+    sys.stdout.buffer.write(f"{DIM}  Scanning sessions...{RESET}\r".encode("utf-8"))
+    sys.stdout.buffer.flush()
     cost_data = _scan_session_costs()
-    _sys.stdout.buffer.write(b"                        \r")
-    _sys.stdout.buffer.flush()
+    sys.stdout.buffer.write(b"                        \r")
+    sys.stdout.buffer.flush()
 
     config = load_config()
-    currency_sym = config.get("currency", "$")
+    currency_sym = _sanitize(config.get("currency", "$"))[:5]
     rate, _code = _get_exchange_rate(currency_sym)
 
     model_rows = sorted(
@@ -2768,22 +2791,18 @@ def cmd_stats():
         months_active = 1.0
         if first_seen:
             try:
-                from datetime import date as _date2
-                import datetime as _dt2
-                fs = _date2.fromisoformat(first_seen)
-                today_d = _date2.today()
-                delta_days = (today_d - fs).days
+                fs = date.fromisoformat(first_seen)
+                delta_days = (date.today() - fs).days
                 months_active = max(delta_days / 30.44, 1.0)
             except (ValueError, TypeError):
                 pass
 
         subscription_ref_usd = 200.0 * months_active
-        if subscription_ref_usd > 0:
-            ratio = cost_data["total_cost_usd"] / subscription_ref_usd
-            utf8_print(
-                f"  {DIM}Subscription value: ~{RESET}{BRIGHT_GREEN}{ratio:.1f}x{RESET}"
-                f"{DIM} vs API pricing ({months_active:.1f} months \u00d7 $200/mo Max){RESET}"
-            )
+        ratio = cost_data["total_cost_usd"] / subscription_ref_usd
+        utf8_print(
+            f"  {DIM}Subscription value: ~{RESET}{BRIGHT_GREEN}{ratio:.1f}x{RESET}"
+            f"{DIM} vs API pricing ({months_active:.1f} months \u00d7 $200/mo Max){RESET}"
+        )
         utf8_print("")
     else:
         utf8_print(f"  {DIM}No session transcript data found for cost analysis.{RESET}\n")
@@ -3602,7 +3621,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, cache_age=None):
                 total_local = total_usd * rate
                 sym = "$" if code == "USD" else currency
                 parts.append((_pri("cumulative_cost"), f"{DIM}All:{RESET} {sym}{total_local:,.2f}"))
-        except Exception:
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
             pass
 
     # Lines changed (from stdin cost data)
