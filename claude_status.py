@@ -2400,7 +2400,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
         # extra, context) so the width budget is split correctly.
         num_bars = sum(1 for k in ("session", "weekly") if show.get(k, True))
         extra = usage.get("extra_usage")
-        if extra and extra.get("is_enabled") and not config.get("extra_hidden", False):
+        if extra and extra.get("is_enabled") and (show.get("extra", False) or "extra" not in show):
             num_bars += 1
         if stdin_ctx and show.get("context", True):
             num_bars += 1
@@ -2533,9 +2533,8 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
     # Auto-shows when credits are gifted, unless user explicitly hid it
     extra = usage.get("extra_usage")
     extra_enabled_by_user = show.get("extra", False)
-    extra_explicitly_hidden = config.get("extra_hidden", False)
     extra_has_credits = extra and extra.get("is_enabled") and (extra.get("monthly_limit") or 0) > 0
-    if extra_enabled_by_user or (extra_has_credits and not extra_explicitly_hidden):
+    if extra_enabled_by_user or (extra_has_credits and "extra" not in show):
         currency = _sanitize(config.get("currency", "\u00a3"))[:5]
         if extra and extra.get("is_enabled"):
             pct = min(extra.get("utilization") or 0, 100)
@@ -2655,9 +2654,8 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None):
         # Check if Extra is in parts (harder to count, so check actual parts)
         extra = usage.get("extra_usage")
         extra_enabled_by_user = show.get("extra", False)
-        extra_explicitly_hidden = config.get("extra_hidden", False)
         extra_has_credits = extra and extra.get("is_enabled") and (extra.get("monthly_limit") or 0) > 0
-        if extra_enabled_by_user or (extra_has_credits and not extra_explicitly_hidden):
+        if extra_enabled_by_user or (extra_has_credits and "extra" not in show):
             usage_count += 1
 
         # Split parts: first usage_count go to line1, rest to line2
@@ -2949,9 +2947,6 @@ def cmd_show(parts_str):
             return
     for part in parts:
         config["show"][part] = True
-        # Clear explicit hide flag so auto-show can work again
-        if part == "extra":
-            config.pop("extra_hidden", None)
     save_config(config)
     utf8_print(f"Enabled: {', '.join(parts)}")
 
@@ -2967,9 +2962,6 @@ def cmd_hide(parts_str):
             return
     for part in parts:
         config["show"][part] = False
-        # Mark extra as explicitly hidden so auto-show respects it
-        if part == "extra":
-            config["extra_hidden"] = True
     save_config(config)
     utf8_print(f"Disabled: {', '.join(parts)}")
 
@@ -2990,9 +2982,6 @@ def cmd_preset(name):
     # Apply show/hide overrides — respect user preferences for update notifications
     for key, val in preset["show_overrides"].items():
         config["show"][key] = val
-    # Full reset should also clear sticky flags
-    if name == "default":
-        config.pop("extra_hidden", None)
     save_config(config)
     try:
         os.remove(get_cache_path())
@@ -3118,10 +3107,12 @@ def cmd_print_config():
                 pct = min(_extra.get("utilization") or 0, 100)
                 utf8_print(f"    Status:    {GREEN}active{RESET}")
                 utf8_print(f"    Used:      {currency}{used:.2f} / {currency}{limit:.2f} ({pct:.0f}%)")
-                if config.get("extra_hidden"):
+                if not show.get("extra", True):
                     utf8_print(f"    Display:   {RED}hidden{RESET}  (run {BOLD}--show extra{RESET} to re-enable)")
-                else:
+                elif "extra" not in show:
                     utf8_print(f"    Display:   {GREEN}auto-shown{RESET}  (run {BOLD}--hide extra{RESET} to suppress)")
+                else:
+                    utf8_print(f"    Display:   {GREEN}on{RESET}  (run {BOLD}--hide extra{RESET} to suppress)")
             else:
                 utf8_print(f"    Status:    {DIM}not active{RESET}")
                 if show.get("extra", False):
