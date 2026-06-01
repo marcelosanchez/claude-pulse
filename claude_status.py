@@ -942,6 +942,7 @@ def load_config():
     peak.setdefault("enabled", True)
     peak.setdefault("start", "13:00")
     peak.setdefault("end", "19:00")
+    peak.setdefault("weekdays_only", True)
     data["peak_hours"] = peak
     show = data.get("show", {})
     for key, default in DEFAULT_SHOW.items():
@@ -2498,6 +2499,10 @@ def _check_peak_hours(config):
       In peak:      '⚡ Peak 2h'
       Approaching:  '⚡ 45m'
       Off-peak:     '✓ Off-Peak'
+
+    Per Anthropic's published policy, peak applies on weekdays only — Saturdays
+    and Sundays are always off-peak. Users can opt out by setting
+    peak_hours.weekdays_only = false in their config.
     """
     peak = config.get("peak_hours", {})
     if not peak.get("enabled", True):
@@ -2508,9 +2513,13 @@ def _check_peak_hours(config):
         clock = config.get("clock_format", "12h")
         display_mode = peak.get("display", DEFAULT_PEAK_DISPLAY)
         minimal = display_mode == "minimal"
+        weekdays_only = peak.get("weekdays_only", True)
         sh, sm = int(start_str.split(":")[0]), int(start_str.split(":")[1])
         eh, em = int(end_str.split(":")[0]), int(end_str.split(":")[1])
         now = datetime.now()
+        # Mon=0..Fri=4 weekdays; Sat=5, Sun=6 weekends.
+        if weekdays_only and now.weekday() >= 5:
+            return False, "✓ Off-Peak" if minimal else "Off-Peak ✓"
         now_mins = now.hour * 60 + now.minute
         start_mins = sh * 60 + sm
         end_mins = eh * 60 + em
@@ -4148,6 +4157,22 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
     return line
 
 
+def _visible_len(text):
+    """Return the number of visible (non-ANSI-escape) characters in *text*."""
+    count = 0
+    i = 0
+    while i < len(text):
+        if text[i] == "\033":
+            j = i + 1
+            while j < len(text) and j < i + 25 and text[j] not in "ABCDEFGHJKSTfmnsulh":
+                j += 1
+            i = j + 1 if j < len(text) else j
+            continue
+        count += 1
+        i += 1
+    return count
+
+
 def _truncate_line(line, config):
     """Clip visible characters to effective terminal width.
 
@@ -4181,6 +4206,61 @@ def _truncate_line(line, config):
     except Exception:
         pass
     return line + "\n"
+
+
+def _wrap_line(line, config):
+    """Wrap at ' | ' separators when the line would overflow the terminal.
+
+    Returns one or two lines joined by newline.  If the line fits, it is
+    returned unchanged (no trailing newline added).  When wrapping is needed,
+    segments are distributed across two lines so that each stays within the
+    effective terminal width.
+    """
+    try:
+        term_width = _detect_terminal_width() or shutil.get_terminal_size((120, 24)).columns
+        max_width_pct = config.get("max_width", DEFAULT_MAX_WIDTH_PCT)
+        if not (isinstance(max_width_pct, int) and 20 <= max_width_pct <= 100):
+            max_width_pct = DEFAULT_MAX_WIDTH_PCT
+        max_visible = (term_width * max_width_pct) // 100
+
+        if _visible_len(line) <= max_visible:
+            return line
+
+        # Split on the rendered separator
+        segments = line.split(" | ")
+        if len(segments) < 2:
+            return _truncate_line(line, config)
+
+        # Greedily fill line 1, then put the rest on line 2
+        line1_parts = [segments[0]]
+        rest = segments[1:]
+        for seg in rest:
+            candidate = " | ".join(line1_parts + [seg])
+            if _visible_len(candidate) <= max_visible:
+                line1_parts.append(seg)
+            else:
+                break
+        used = len(line1_parts)
+        line2_parts = segments[used:]
+
+        if not line2_parts:
+            return _truncate_line(line, config)
+
+        row1 = " | ".join(line1_parts)
+        row2 = " | ".join(line2_parts)
+        # Truncate each row individually as a safety net
+        row1 = _truncate_line(row1, config)
+        row2 = _truncate_line(row2, config)
+        return row1 + RESET + "\n" + row2
+    except Exception:
+        return _truncate_line(line, config)
+
+
+def _fit_line(line, config):
+    """Apply wrap or truncate depending on the user's --wrap setting."""
+    if config.get("wrap") == "auto":
+        return _wrap_line(line, config)
+    return _truncate_line(line, config)
 
 
 # ---------------------------------------------------------------------------
@@ -4227,8 +4307,12 @@ def install_status_line():
         try:
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except json.JSONDecodeError:
+            print(f"Error: {settings_path} contains invalid JSON. Fix or remove it before installing.", file=sys.stderr)
+            return
+        except OSError as e:
+            print(f"Error: Cannot read {settings_path}: {e}", file=sys.stderr)
+            return
 
     # Status line command — use $HOME on Windows for Claude Code compat
     settings["statusLine"] = {
@@ -4248,6 +4332,32 @@ def install_status_line():
     utf8_print(f"Command: {python_cmd} \"{script_path}\"")
     utf8_print("Restart Claude Code to see the status line.")
     utf8_print("Tip: use --animate on for always-on rainbow animation.")
+
+
+def install_pulse_command():
+    """Copy the /pulse slash command into the user's Claude commands dir.
+
+    The shell installers already do this, but running ``--install`` directly
+    used to set up the status line while leaving ``/pulse`` uninstalled -- the
+    meter worked yet the command silently did nothing.  Making --install
+    self-sufficient closes that gap no matter how the user installed.
+    """
+    source = Path(__file__).resolve().parent / "pulse.md"
+    if not source.exists():
+        utf8_print("Note: pulse.md not found next to claude_status.py; skipped installing the /pulse command.")
+        utf8_print("      Re-run the full installer (install.sh / install.ps1) to add it.")
+        return
+
+    commands_dir = Path.home() / ".claude" / "commands"
+    dest = commands_dir / "pulse.md"
+    try:
+        _secure_mkdir(commands_dir)
+        shutil.copyfile(source, dest)
+    except OSError as e:
+        utf8_print(f"Note: could not install the /pulse command: {e}")
+        return
+
+    utf8_print(f"Installed /pulse command to {dest}")
 
 
 # ---------------------------------------------------------------------------
@@ -4385,6 +4495,157 @@ def cmd_set_theme(name):
         colours = THEMES[name]
         preview = f"{colours['low']}{FILL * 3}{colours['mid']}{FILL * 3}{colours['high']}{FILL * 2}{RESET}"
     utf8_print(f"Theme set to {BOLD}{name}{RESET}  {preview}")
+
+
+REVERSE = "\033[7m"  # reverse video — highlights the selected row in the picker
+
+
+def _enable_windows_ansi():
+    """Enable ANSI/VT processing on the Windows console so the picker renders.
+
+    Windows Terminal enables this by default; legacy conhost does not. Modern
+    Windows (10+) supports ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x0004).
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        os.system("")  # last-resort: spawning a shell flips VT on as a side effect
+
+
+def _read_key():
+    """Block for a single keypress and return a normalised token.
+
+    Returns one of: 'up', 'down', 'enter', 'esc', 'ctrl-c', or the literal
+    character pressed (e.g. 'q', 'k'). Arrow keys differ by platform: Windows
+    sends a '\\x00'/'\\xe0' prefix then a letter; POSIX sends an ESC '[' sequence.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):  # special-key prefix; the real code follows
+            code = msvcrt.getwch()
+            return {"H": "up", "P": "down", "K": "left", "M": "right"}.get(code, "")
+        if ch in ("\r", "\n"):
+            return "enter"
+        if ch == "\x1b":
+            return "esc"
+        if ch == "\x03":
+            return "ctrl-c"
+        return ch
+    # POSIX
+    import termios
+    import tty
+    import select
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            # Could be a lone ESC or the start of an arrow sequence — peek briefly.
+            ready, _, _ = select.select([sys.stdin], [], [], 0.03)
+            if not ready:
+                return "esc"
+            if sys.stdin.read(1) == "[":
+                code = sys.stdin.read(1)
+                return {"A": "up", "B": "down", "C": "right", "D": "left"}.get(code, "")
+            return "esc"
+        if ch in ("\r", "\n"):
+            return "enter"
+        if ch == "\x03":
+            return "ctrl-c"
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _render_picker(names, cursor, current_theme, bar_size, bar_style):
+    """Build the full picker screen: one live status-line preview per theme,
+    with the cursor row highlighted in reverse video."""
+    demo_usage = {
+        "five_hour": {"utilization": 42, "resets_at": None},
+        "seven_day": {"utilization": 67, "resets_at": None},
+    }
+    lines = [
+        "",
+        f"  {BOLD}Pick a theme{RESET}   {DIM}↑/↓ move · Enter keep · Esc cancel{RESET}",
+        f"  {DIM}{'─' * 60}{RESET}",
+    ]
+    for i, name in enumerate(names):
+        demo_tc = THEME_DEMO_TEXT.get(name, "white")
+        demo_config = {
+            "theme": name, "bar_size": bar_size, "bar_style": bar_style,
+            "text_color": demo_tc,
+            "show": {"session": True, "weekly": True, "plan": True, "timer": False,
+                     "extra": False, "sparkline": False, "runway": False,
+                     "status_message": False, "streak": False, "model": False, "context": False},
+        }
+        preview = build_status_line(demo_usage, "Max 20x", demo_config)
+        tag = f" {GREEN}(current){RESET}" if name == current_theme else ""
+        if i == cursor:
+            label = f"{BOLD}▸{RESET} {REVERSE}{BOLD} {name:<8} {RESET}"
+        else:
+            label = f"  {BOLD} {name:<8} {RESET}"
+        lines.append(f"  {label} {preview}{tag}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def cmd_pick_theme():
+    """Interactive arrow-key theme picker with a live status-line preview.
+
+    Requires an interactive terminal. When stdin/stdout is not a TTY (e.g. run
+    through a tool that captures output) it falls back to the static gallery so
+    nothing crashes and the user can still pick with ``--theme <name>``.
+    """
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        cmd_themes_demo()
+        utf8_print(f"  {DIM}The live picker needs an interactive terminal. "
+                   f"Pick one above and set it with:  --theme <name>{RESET}")
+        return
+
+    _enable_windows_ansi()
+
+    config = load_config()
+    current_theme = config.get("theme", "default")
+    bar_size = config.get("bar_size", DEFAULT_BAR_SIZE)
+    bar_style = config.get("bar_style", DEFAULT_BAR_STYLE)
+    names = list(THEMES.keys())
+    cursor = names.index(current_theme) if current_theme in names else 0
+
+    def _w(text):
+        sys.stdout.buffer.write(text.encode("utf-8"))
+        sys.stdout.flush()
+
+    chosen = None
+    _w("\x1b[?1049h\x1b[?25l")  # enter alternate screen + hide cursor
+    try:
+        while True:
+            _w("\x1b[H\x1b[J" + _render_picker(names, cursor, current_theme, bar_size, bar_style))
+            key = _read_key()
+            if key in ("up", "k"):
+                cursor = (cursor - 1) % len(names)
+            elif key in ("down", "j"):
+                cursor = (cursor + 1) % len(names)
+            elif key == "enter":
+                chosen = names[cursor]
+                break
+            elif key in ("esc", "ctrl-c", "q"):
+                break
+    finally:
+        _w("\x1b[?25h\x1b[?1049l")  # show cursor + leave alternate screen
+
+    if chosen:
+        cmd_set_theme(chosen)  # handles default→factory-reset, cache clear, confirmation
+    else:
+        utf8_print("Theme unchanged.")
 
 
 def cmd_show(parts_str):
@@ -4599,6 +4860,7 @@ def main():
 
     if "--install" in args:
         install_status_line()
+        install_pulse_command()
         return
 
     if "--preset" in args:
@@ -4625,6 +4887,10 @@ def main():
 
     if "--themes-demo" in args:
         cmd_themes_demo()
+        return
+
+    if "--pick-theme" in args or "--pick" in args:
+        cmd_pick_theme()
         return
 
     if "--themes" in args:
@@ -4812,6 +5078,31 @@ def main():
             utf8_print(f"Max width: {BOLD}{val}%{RESET} of terminal width")
         else:
             utf8_print("Usage: --max-width <20-100>  (percentage, default 80)")
+        return
+
+    if "--wrap" in args:
+        idx = args.index("--wrap")
+        if idx + 1 < len(args):
+            val = args[idx + 1].lower()
+            if val not in ("off", "auto"):
+                utf8_print(f"Unknown wrap mode: {_sanitize(val)}")
+                utf8_print("Available: off, auto")
+                return
+            config = load_config()
+            config["wrap"] = val
+            save_config(config)
+            try:
+                os.remove(get_cache_path())
+            except OSError:
+                pass
+            if val == "auto":
+                utf8_print(f"Wrap: {GREEN}auto{RESET}  (splits at | when line overflows)")
+            else:
+                utf8_print(f"Wrap: {BOLD}off{RESET}  (truncate, default)")
+        else:
+            utf8_print("Usage: --wrap <off|auto>")
+            utf8_print(f"  {'off':<10} Truncate long lines (default)")
+            utf8_print(f"  {'auto':<10} Wrap to 2 lines at | separators when overflow")
         return
 
     if "--bar-style" in args:
@@ -5271,7 +5562,7 @@ def main():
 
         line = append_update_indicator(line, config)
         line = append_claude_update_indicator(line, config)
-        line = _truncate_line(line, config)
+        line = _fit_line(line, config)
         sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
         return
 
@@ -5285,8 +5576,8 @@ def main():
             line = cached.get("line", "")
         line = append_update_indicator(line, config)
         line = append_claude_update_indicator(line, config)
-        line = _truncate_line(line, config)
-        sys.stdout.buffer.write((line + RESET + "\n\n").encode("utf-8"))
+        line = _fit_line(line, config)
+        sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
         return
 
     # --- API fallback (first call or no stdin rate limits) ---
@@ -5400,8 +5691,8 @@ def main():
         write_cache(cache_path, line)
     line = append_update_indicator(line, config)
     line = append_claude_update_indicator(line, config)
-    line = _truncate_line(line, config)
-    sys.stdout.buffer.write((line + RESET + "\n\n").encode("utf-8"))
+    line = _fit_line(line, config)
+    sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
 
 
 if __name__ == "__main__":

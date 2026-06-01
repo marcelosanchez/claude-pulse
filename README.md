@@ -125,14 +125,16 @@ Use `/pulse` in Claude Code for an interactive setup wizard, or configure direct
 --bar-size large           # small, small-medium, medium, medium-large, large
 --bar-style block          # classic, block, shade, pipe, dot, square, star, braille
 --layout compact           # standard, compact, minimal, percent-first
+--wrap auto                # off (default, truncate) or auto (wrap to 2 lines at | when narrow)
 
 # Currency (auto-converts USD via live exchange rate)
 --currency £               # $, £, €, ¥, C$, A$, ₹, kr, and 20+ more
 
-# Peak hours (local time) — red in peak, green off-peak
+# Peak hours (local time, weekdays only — Sat/Sun always off-peak per Anthropic policy)
 --peak-hours 13:00-19:00   # Set your peak window
 --peak-hours off           # Disable peak indicator
 # Set "display": "minimal" in config for short format (⚡ Peak 2h)
+# Set "weekdays_only": false in config to show the window every day
 
 # Clock
 --clock-format 12h         # 12h or 24h

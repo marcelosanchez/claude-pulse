@@ -20,6 +20,13 @@ If $ARGUMENTS matches a **theme name** (`default`, `ocean`, `sunset`, `mono`, `n
 -> Run `python "SCRIPT_PATH" --theme <name>` directly, no menu.
 -> Confirm: "Theme set to **<name>**. The status line will update on the next refresh."
 
+If $ARGUMENTS is `pick`, `picker`, or `pick-theme`:
+-> This is the **live arrow-key theme picker**: one screen, scroll through all 10 themes, and the status-bar preview recolours live. It needs an interactive terminal, so the **user must launch it themselves** — you cannot drive the keypresses for them.
+-> Tell the user to type this in their prompt to launch it:
+   `!python "SCRIPT_PATH" --pick-theme`
+-> Explain the controls in one line: "↑/↓ (or j/k) to move · Enter to keep · Esc to cancel — your bar recolours live as you move."
+-> Add the fallback note: "If you see a static coloured list instead of a moving cursor, this terminal isn't interactive here — just note the name you like and run `/pulse <name>`."
+
 If $ARGUMENTS is `config` or `settings`:
 -> Run `python "SCRIPT_PATH" --config` silently.
 -> Summarise the settings in your response text (don't show raw ANSI output).
@@ -100,7 +107,13 @@ Run `python "SCRIPT_PATH" --config` silently to check for updates.
 
 **Step 1:** Run `python "SCRIPT_PATH" --themes-demo` and show the output.
 
-**Step 2:** Theme picker (paginated as 3 pages):
+**Step 2:** Theme — offer the **live picker** first.
+
+Say: "For the best experience, launch the live picker — type  `!python "SCRIPT_PATH" --pick-theme`  in your prompt. Arrow keys move through all 10 themes, your bar recolours live, Enter keeps it, Esc cancels. (If it shows a static list instead of a moving cursor, this terminal isn't interactive — use the quick picker below.)"
+
+If the user would rather pick from a list right here (or the live picker isn't available in their terminal), use the paginated picker below.
+
+Theme picker (paginated as 3 pages):
 
 Page 1:
 ```

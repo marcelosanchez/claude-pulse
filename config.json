@@ -17,7 +17,8 @@
   "peak_hours": {
     "enabled": true,
     "start": "13:00",
-    "end": "19:00"
+    "end": "19:00",
+    "weekdays_only": true
   },
   "show": {
     "session": true,
