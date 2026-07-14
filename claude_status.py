@@ -4521,7 +4521,6 @@ def install_status_line():
     settings["statusLine"] = {
         "type": "command",
         "command": f'{python_cmd} "{script_path}"',
-        "refresh": 150,
     }
 
     # No hooks installed here — static status bar by default.
