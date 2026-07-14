@@ -2487,7 +2487,7 @@ def _fmt_peak_time(hhmm_str, clock="12h"):
         return hhmm_str
 
 
-def _check_peak_hours(config):
+def _check_peak_hours(config, plan=None):
     """Check peak hours status. Returns (is_peak, display_str).
 
     Full mode:
@@ -2504,6 +2504,10 @@ def _check_peak_hours(config):
     and Sundays are always off-peak. Users can opt out by setting
     peak_hours.weekdays_only = false in their config.
     """
+    # Pro/Max on Claude Code no longer have peak throttling
+    # (removed 2026-05-06, anthropic.com/news/higher-limits-spacex)
+    if plan in ("Pro", "Max"):
+        return False, ""
     peak = config.get("peak_hours", {})
     if not peak.get("enabled", True):
         return False, ""
@@ -3052,6 +3056,15 @@ def _parse_stdin_context(raw_stdin):
                 result["worktree_branch"] = branch
             elif name:
                 result["worktree_branch"] = name
+    except (AttributeError, KeyError):
+        pass
+
+    # Effort level (v2.1.x) - Claude Code sends it on stdin, not via env var
+    try:
+        effort = data.get("data", data).get("effort", {})
+        level = _sanitize(effort.get("level", ""))
+        if level:
+            result["effort"] = level
     except (AttributeError, KeyError):
         pass
 
@@ -4016,7 +4029,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
                 parts.append((_pri("lines"), f"{BRIGHT_GREEN}+{a}{RESET} {BRIGHT_RED}-{r}{RESET}"))
 
     # Peak hours indicator
-    is_peak, peak_str = _check_peak_hours(config)
+    is_peak, peak_str = _check_peak_hours(config, plan)
     if peak_str:
         _pk = _pri("peak")
         if is_peak:
@@ -4045,9 +4058,11 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
             if model:
                 parts.append((_pri("model"), f"{BLUE_MODEL}{model}{RESET}"))
 
-    # Effort level
+    # Effort level - stdin (v2.1.x); CLAUDE_EFFORT is the live env fallback
     if show.get("effort", True):
-        effort = os.environ.get("CLAUDE_CODE_EFFORT_LEVEL", "")
+        effort = ((stdin_ctx or {}).get("effort")
+                  or os.environ.get("CLAUDE_EFFORT", "")
+                  or os.environ.get("CLAUDE_CODE_EFFORT_LEVEL", ""))
         if effort and effort != "unset":
             effort = _sanitize(effort)
             effort_short = {"medium": "med"}.get(effort, effort)
