@@ -86,6 +86,7 @@ BLUE = "\033[34m"
 MAGENTA = "\033[35m"
 WHITE = "\033[37m"
 GRAY = "\033[38;2;89;89;89m"           # #595959 (gris oscuro)
+GRAY_LIGHT = "\033[38;2;120;120;120m"   # #787878 (un paso mas claro que GRAY)
 BRIGHT_WHITE = "\033[97m"
 BRIGHT_GREEN = "\033[92m"
 BRIGHT_YELLOW = "\033[93m"
@@ -545,9 +546,13 @@ def _format_effort(level, effort_format=DEFAULT_EFFORT_FORMAT):
     full = EFFORT_FULL.get(level, level.title())
     return f"Effort: {full}" if effort_format == "labeled" else full
 
-# Higher effort burns limits faster, so escalate the colour with it.
+# Higher effort steps up the tone, but nothing on the bar may shout except
+# the red of excessive consumption: high is only a lighter grey, and xhigh /
+# max reuse the muted yellow and orange of the dark bar palette. Red is not
+# used because choosing more compute is a decision, not a fault.
 EFFORT_COLOURS = {
-    "low": DIM, "medium": "", "high": "", "xhigh": YELLOW, "max": BRIGHT_RED,
+    "low": DIM, "medium": "", "high": GRAY_LIGHT,
+    "xhigh": YELLOW_DARK, "max": YELLOW_RED_DARK,
 }
 
 # Pull-request review states, as reported on stdin.
@@ -2120,7 +2125,7 @@ _USAGE_CACHE_KEYS = {
 
 def write_cache(cache_path, line, usage=None, plan=None,
                 rate_limited_until=None, rate_limit_fails=None,
-                data_timestamp=None, user=None):
+                data_timestamp=None, user=None, api_fetched_at=None):
     """Persist the rendered line plus optional usage/plan and 429 backoff state.
 
     ``rate_limited_until`` is an epoch after which it is worth calling the API
@@ -2135,6 +2140,10 @@ def write_cache(cache_path, line, usage=None, plan=None,
 
     ``user`` is the display name for the user segment. It is cached so stdin
     and cache repaints skip the profile request.
+
+    ``api_fetched_at`` is the epoch of the last oauth/usage call. The stdin
+    path rewrites the cache on every repaint, so ``timestamp`` cannot tell how
+    old the API-only windows (per-model caps, extra credits) really are.
     """
     try:
         data = {"timestamp": data_timestamp or time.time(), "line": line}
@@ -2146,6 +2155,8 @@ def write_cache(cache_path, line, usage=None, plan=None,
             data["plan"] = plan
         if user is not None:
             data["user"] = user
+        if api_fetched_at:
+            data["api_fetched_at"] = api_fetched_at
         if rate_limited_until:
             data["rate_limited_until"] = rate_limited_until
             data["rate_limited"] = True
@@ -2704,21 +2715,33 @@ def _calc_pace_pct(resets_at_str, window_seconds):
         return None
 
 
+# Pace bands, in percentage points of (usage % - elapsed %). Five points of
+# drift is noise over a 5h window. Twenty points is a full hour of budget on
+# the 5h window and about 1.4 days on the weekly one: at that gap the window
+# runs dry long before it resets, which is what the double arrow flags.
+PACE_ON_TRACK_PTS = 5
+PACE_STRONG_PTS = 20
+
+
 def _pace_indicator(pct, pace):
     """Return a colored pace arrow comparing usage % vs elapsed time %
 
-    ↓ (green) = under pace, ↑ (red) = over pace, - = on track.
-    Threshold: within 5% difference is considered on track.
+    ↓ / ⇊ under pace, ↑ / ⇈ over pace, - on track. Only the strong over-pace
+    arrow is red: it is the one case of excessive consumption on the bar, and
+    nothing else is allowed to shout.
     """
     if pace is None:
         return ""
     diff = pct - pace
-    if diff < -5:
-        return f" {GREEN}\u2193{RESET}"
-    elif diff > 5:
-        return f" {RED}\u2191{RESET}"
-    else:
-        return " -"
+    if diff < -PACE_STRONG_PTS:
+        return f" {GREEN}\u21ca{RESET}"
+    if diff < -PACE_ON_TRACK_PTS:
+        return f" {GREEN_DARK}\u2193{RESET}"
+    if diff > PACE_STRONG_PTS:
+        return f" {RED}\u21c8{RESET}"
+    if diff > PACE_ON_TRACK_PTS:
+        return f" {YELLOW_RED_DARK}\u2191{RESET}"
+    return " -"
 
 
 def format_reset_time(resets_at_str):
@@ -7187,17 +7210,42 @@ def main():
         # bar. extra_usage and per-model caps are both nice-to-have; the
         # five-hour and weekly windows are the status line.
         has_core = "five_hour" in usage_from_stdin or "seven_day" in usage_from_stdin
-        if not has_core and not has_model_caps and "extra_usage" not in usage_from_stdin:
+        need_api = not has_core and not has_model_caps and "extra_usage" not in usage_from_stdin
+
+        # Exception to the rule above: Claude Code 2.1.x puts only five_hour
+        # and seven_day on stdin, so a per-model bar (Opus/Sonnet/Fable) can
+        # only come from the API. Without a refetch it freezes at whatever the
+        # cache first captured, because every repaint rewrites the cache and
+        # keeps it fresh forever. Refresh those windows on the normal cache
+        # TTL, but only while a per-model bar is actually on, so a default
+        # config still makes zero API calls. A pending 429 backoff wins.
+        api_fetched_at = float((cached or {}).get("api_fetched_at") or 0)
+        wants_model_caps = any(
+            config.get("show", {}).get(w) for w in ("opus", "sonnet", "fable"))
+        backoff_until = float((cached or {}).get("rate_limited_until") or 0)
+        if (wants_model_caps and time.time() - api_fetched_at > cache_ttl
+                and time.time() >= backoff_until):
+            need_api = True
+
+        if need_api:
+            # Stamp the attempt, not just the success: a failing API must not
+            # be retried on every repaint. The next try waits a full TTL.
+            api_fetched_at = time.time()
             try:
                 token, api_plan = get_credentials()
                 if token:
                     api_usage = fetch_usage(token)
+                    # stdin always wins for the windows it carries. Everything
+                    # else is overwritten from the API, None included, so a
+                    # window the API stopped reporting also leaves the cache.
+                    stdin_keys = {k for k, v in stdin_rl.items() if v}
                     for key, value in api_usage.items():
-                        if key in _USAGE_CACHE_KEYS and key not in usage_from_stdin:
+                        if key in _USAGE_CACHE_KEYS and key not in stdin_keys:
                             usage_from_stdin[key] = value
                     if api_plan:
                         plan_from_cache = api_plan
-                    write_cache(cache_path, "", usage=api_usage, plan=plan_from_cache)
+                    write_cache(cache_path, "", usage=api_usage, plan=plan_from_cache,
+                                api_fetched_at=api_fetched_at)
             except Exception:
                 pass
 
@@ -7219,7 +7267,8 @@ def main():
             _append_context_history(stdin_ctx["context_pct"])
 
         # Write to cache so staleness tracking works
-        write_cache(cache_path, line, usage_from_stdin, plan_from_cache, user=user_from_cache)
+        write_cache(cache_path, line, usage_from_stdin, plan_from_cache, user=user_from_cache,
+                    api_fetched_at=api_fetched_at)
 
         line = append_update_indicator(line, config)
         line = append_claude_update_indicator(line, config, stdin_ctx)
