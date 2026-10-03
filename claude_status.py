@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code status line — reads usage data from Claude Code's stdin and displays real-time bars."""
 
-VERSION = "3.1.0"
+VERSION = "3.3.0"
 
 import json
 import math
@@ -126,25 +126,53 @@ PLAN_NAMES = {
     "default_claude_max_20x": "Max",
 }
 
+# Model id → short display name. Longest-prefix wins (see _model_short_name),
+# so "claude-opus-4-8" beats the bare "claude-opus-4" entry.
 MODEL_SHORT_NAMES = {
-    "claude-opus-4": "Opus",
-    "claude-sonnet-4": "Sonnet",
-    "claude-haiku-4": "Haiku",
+    "claude-fable-5": "Fable",
+    "claude-mythos-5": "Mythos",
+    "claude-mythos-preview": "Mythos",
+    "claude-opus-5": "Opus",
+    "claude-opus-4-8": "Opus",
+    "claude-opus-4-7": "Opus",
     "claude-opus-4-6": "Opus",
+    "claude-opus-4-5": "Opus",
+    "claude-opus-4": "Opus",
+    "claude-sonnet-5": "Sonnet",
+    "claude-sonnet-4-6": "Sonnet",
     "claude-sonnet-4-5": "Sonnet",
+    "claude-sonnet-4": "Sonnet",
     "claude-haiku-4-5": "Haiku",
+    "claude-haiku-4": "Haiku",
     "claude-3-5-sonnet": "Sonnet",
     "claude-3-5-haiku": "Haiku",
     "claude-3-opus": "Opus",
 }
 
-# Context window sizes by model short name (used to derive token counts from %)
+# Context window sizes by model display name, as it arrives on stdin
+# ("Opus 4.6", "Sonnet 5", ...) with a bare-family fallback. Only consulted
+# when stdin omits context_window.context_window_size; when that field is
+# present we always trust it over this table.
+#
+# The Claude 5 family and Opus/Sonnet 4.6+ are 1M-context; Haiku 4.5 and the
+# Claude 3.x models remain 200K.
 MODEL_CONTEXT_WINDOWS = {
-    "Opus": 200_000,
-    "Opus 4.6": 200_000,
-    "Sonnet": 200_000,
-    "Sonnet 4": 200_000,
+    "Fable": 1_000_000,
+    "Fable 5": 1_000_000,
+    "Mythos": 1_000_000,
+    "Mythos Preview": 1_000_000,
+    "Mythos 5": 1_000_000,
+    "Opus": 1_000_000,
+    "Opus 5": 1_000_000,
+    "Opus 4.8": 1_000_000,
+    "Opus 4.7": 1_000_000,
+    "Opus 4.6": 1_000_000,
+    "Opus 4.5": 200_000,
+    "Sonnet": 1_000_000,
+    "Sonnet 5": 1_000_000,
+    "Sonnet 4.6": 1_000_000,
     "Sonnet 4.5": 200_000,
+    "Sonnet 4": 200_000,
     "Haiku": 200_000,
     "Haiku 4.5": 200_000,
 }
@@ -154,24 +182,45 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 _ANSI_PATTERN = re.compile(r'\x1b[^a-zA-Z]*[a-zA-Z]')
 _CONTROL_PATTERN = re.compile(r'[\x00-\x09\x0b-\x1f\x7f-\x9f]')
 
-# API pricing per million tokens (USD) — updated 2025
-# https://docs.anthropic.com/en/docs/about-claude/pricing
+# API pricing per million tokens (USD).
+# https://platform.claude.com/docs/en/pricing
+# Cache read is 0.1x input; 5-minute cache write is 1.25x input.
 API_PRICING = {
-    "claude-opus-4-6": {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_write": 18.75},
+    "claude-fable-5": {"input": 10.0, "output": 50.0, "cache_read": 1.0, "cache_write": 12.5},
+    "claude-mythos-5": {"input": 10.0, "output": 50.0, "cache_read": 1.0, "cache_write": 12.5},
+    "claude-mythos-preview": {"input": 25.0, "output": 125.0, "cache_read": 2.5, "cache_write": 31.25},
+    "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-8": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-7": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-6": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-5": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
     "claude-opus-4": {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_write": 18.75},
+    # Sonnet 5 launched at a $2/$10 introductory rate due to rise to $3/$15
+    # on 2026-09-01; Anthropic cancelled the increase and made the launch
+    # rate the standard price (pricing docs, note
+    # "claude-sonnet-5-introductory-pricing"), so $2/$10 is the list price.
+    "claude-sonnet-5": {"input": 2.0, "output": 10.0, "cache_read": 0.20, "cache_write": 2.5},
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
     "claude-sonnet-4-5": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
     "claude-sonnet-4": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
-    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
-    "claude-haiku-4-5": {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
+    "claude-haiku-4-5-20251001": {"input": 1.0, "output": 5.0, "cache_read": 0.10, "cache_write": 1.25},
+    "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cache_read": 0.10, "cache_write": 1.25},
     "claude-3-5-sonnet": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
     "claude-3-5-haiku": {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
     "claude-3-opus": {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_write": 18.75},
 }
 # Display names for pricing table
 API_PRICING_DISPLAY = {
+    "claude-fable-5": "Fable 5",
+    "claude-mythos-5": "Mythos 5",
+    "claude-mythos-preview": "Mythos Preview",
+    "claude-opus-5": "Opus 5",
+    "claude-opus-4-8": "Opus 4.8",
+    "claude-opus-4-7": "Opus 4.7",
     "claude-opus-4-6": "Opus 4.6",
+    "claude-opus-4-5": "Opus 4.5",
     "claude-opus-4": "Opus 4",
+    "claude-sonnet-5": "Sonnet 5",
     "claude-sonnet-4-6": "Sonnet 4.6",
     "claude-sonnet-4-5": "Sonnet 4.5",
     "claude-sonnet-4": "Sonnet 4",
@@ -181,6 +230,61 @@ API_PRICING_DISPLAY = {
     "claude-3-5-haiku": "Haiku 3.5",
     "claude-3-opus": "Opus 3",
 }
+
+
+# Introductory / promotional rates, applied until the stated UTC date.
+# Keeping these separate from API_PRICING means the table remains the list
+# price and the promo simply expires on its own without a code change.
+# Currently empty: Sonnet 5's $2/$10 launch rate became the standard price
+# (the scheduled 2026-09-01 increase was cancelled), so it lives in
+# API_PRICING proper. Shape, keyed by model id:
+#     "model-id": {"until": "YYYY-MM-DD", "pricing": {...API_PRICING shape...}},
+API_PRICING_PROMOS = {}
+
+
+def _pricing_for(model_id, at=None):
+    """Return the per-MTok rates for *model_id*, honouring active promos.
+
+    *at* is a UTC date (defaults to today). A promo whose end date has passed
+    falls back to the list price automatically.
+
+    Known limitation: fast mode bills Opus 5 / 4.8 at $10/$50 rather than
+    $5/$25, but transcripts do not record whether a request used it, so
+    historical scans price fast-mode turns at the standard rate and will
+    under-report them.
+    """
+    base = API_PRICING.get(model_id)
+    if base is None:
+        return None
+    promo = API_PRICING_PROMOS.get(model_id)
+    if not promo:
+        return base
+    try:
+        until = date.fromisoformat(promo["until"])
+        today = at or datetime.now(timezone.utc).date()
+        if today <= until:
+            return promo["pricing"]
+    except (ValueError, TypeError, KeyError):
+        pass
+    return base
+
+
+def _model_short_name(model_id):
+    """Map a model id to its short family name, longest prefix wins.
+
+    ``MODEL_SHORT_NAMES`` holds both bare-family keys ("claude-opus-4") and
+    versioned ones ("claude-opus-4-8"). A plain dict lookup misses dated
+    variants like ``claude-haiku-4-5-20251001``, and a naive prefix scan would
+    let "claude-opus-4" shadow "claude-opus-4-8", so match on the longest key
+    that the id starts with.
+    """
+    if not model_id:
+        return None
+    best = None
+    for key, short in MODEL_SHORT_NAMES.items():
+        if model_id.startswith(key) and (best is None or len(key) > len(best[0])):
+            best = (key, short)
+    return best[1] if best else None
 
 # ---------------------------------------------------------------------------
 # Hook infrastructure constants
@@ -395,12 +499,77 @@ THEME_TEXT_DEFAULTS = {
 # Widget priorities — lower number = rendered first (leftmost).
 # Users can override via config["widget_priority"] = {"session": 1, "weekly": 2, ...}
 WIDGET_PRIORITY = {
-    "session": 10, "weekly": 20, "opus": 30, "sonnet": 40, "extra": 50,
-    "context": 60, "cost": 70, "cumulative_cost": 72, "lines": 75, "peak": 80, "plan": 90,
-    "streak": 100, "model": 110, "effort": 120, "worktree": 130,
+    "session": 10, "weekly": 20, "opus": 30, "sonnet": 40, "fable": 45, "extra": 50,
+    "context": 60, "cache": 65, "cost": 70, "cumulative_cost": 72,
+    "weekly_cost": 73, "lines": 75, "plan": 90,
+    "streak": 100, "model": 110, "effort": 120, "fast_mode": 122,
+    "thinking": 124, "agent": 126, "worktree": 130,
     "heartbeat": 140, "activity": 150, "last_tool": 160, "branch": 170,
-    "sessions": 180, "pomodoro": 190, "git_drift": 200, "files_changed": 210,
+    "pr": 175,
+    "subagents": 178, "sessions": 180, "budget": 185, "pomodoro": 190, "git_drift": 200, "files_changed": 210,
     "user": 220,
+}
+
+# Reasoning-effort display. Claude Code reports low|medium|high|xhigh|max.
+# Three renderings, because "med" reads as cryptic to anyone who hasn't
+# memorised the abbreviations, while the full word costs width on a busy bar.
+EFFORT_SHORT = {
+    "low": "lo", "medium": "med", "high": "hi", "xhigh": "xh", "max": "max",
+}
+EFFORT_FULL = {
+    "low": "Low", "medium": "Medium", "high": "High",
+    "xhigh": "XHigh", "max": "Max",
+}
+EFFORT_FORMATS = ("short", "full", "labeled")
+# Default to the labelled form: "med" is only legible if you already know the
+# abbreviations, and even "Medium" on its own is ambiguous next to a model name.
+DEFAULT_EFFORT_FORMAT = "labeled"
+
+
+def _format_effort(level, effort_format=DEFAULT_EFFORT_FORMAT):
+    """Render a reasoning-effort level per the user's ``effort_format``.
+
+    short   → ``med``
+    full    → ``Medium``
+    labeled → ``Effort: Medium``  (default; unambiguous at a glance)
+
+    An unrecognised level is passed through rather than dropped — a new effort
+    tier should still show up, just without a prettier name.
+    """
+    if not level:
+        return ""
+    if effort_format not in EFFORT_FORMATS:
+        effort_format = DEFAULT_EFFORT_FORMAT
+    if effort_format == "short":
+        return EFFORT_SHORT.get(level, level)
+    full = EFFORT_FULL.get(level, level.title())
+    return f"Effort: {full}" if effort_format == "labeled" else full
+
+# Higher effort burns limits faster, so escalate the colour with it.
+EFFORT_COLOURS = {
+    "low": DIM, "medium": "", "high": "", "xhigh": YELLOW, "max": BRIGHT_RED,
+}
+
+# Pull-request review states, as reported on stdin.
+PR_STATE_GLYPHS = {
+    "approved": "✓",       # ✓
+    "changes_requested": "✗",  # ✗
+    "pending": "•",        # •
+}
+PR_STATE_COLOURS = {
+    "approved": GREEN,
+    "changes_requested": RED,
+    "pending": YELLOW,
+}
+
+# Claude Code enforces its own per-session caps but exposes them neither on
+# stdin nor in settings.json, so these are claude-pulse's own denominators.
+# They default to Claude Code's documented values; override under "limits" in
+# config.json if your setup differs. Set any to 0 to hide that denominator.
+DEFAULT_LIMITS = {
+    "subagent_spawns": 200,      # per-session subagent spawn cap
+    "subagent_concurrent": 20,   # concurrently-running subagent cap
+    "web_searches": 200,         # per-session WebSearch call cap
 }
 
 DEFAULT_SHOW = {
@@ -414,17 +583,25 @@ DEFAULT_SHOW = {
     "cost": True,
     "model": True,
     "branch": True,
-    "heartbeat": True,
-    "activity": True,
+    # Opt-in: the spinner and tool counter are noise for most people, and both
+    # need the PostToolUse hook anyway. --show heartbeat (or /pulse) turns them
+    # on. Leaving them off by default also means a stock config asks for no
+    # repaint timer at all.
+    "heartbeat": False,
+    "activity": False,
     "update": True,
     "claude_update": True,
     # Per-model caps (show when available)
     "opus": True,
     "sonnet": True,
+    "fable": True,
     # Opt-in features
     "plan": False,
     "extra": False,
     "effort": True,
+    "fast_mode": True,
+    "thinking": False,
+    "agent": True,
     "worktree": True,
     "pomodoro": True,
     "context_warning": True,
@@ -432,6 +609,11 @@ DEFAULT_SHOW = {
     "lines": True,
     # Hidden by default — opt-in with --show
     "cumulative_cost": False,
+    "weekly_cost": False,
+    "cache": False,
+    "subagents": True,
+    "budget": True,
+    "pr": False,
     "burn_rate": False,
     "sessions": False,
     "last_tool": False,
@@ -804,6 +986,25 @@ def _get_cache_base_path():
     return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
 
 
+def _claude_config_dir():
+    """Return Claude Code's active config dir, honouring ``CLAUDE_CONFIG_DIR``.
+
+    Claude Code reads settings, commands and credentials from
+    ``$CLAUDE_CONFIG_DIR`` when it is set, falling back to ``~/.claude``.
+    ``install.sh`` / ``install.ps1`` already respect it; before this helper
+    ``claude_status.py`` always wrote to ``~/.claude``, so a multi-profile user
+    got the status line registered in one dir and the ``/pulse`` command in
+    another, and the meter silently never appeared.
+
+    An empty or whitespace-only value is treated as unset rather than as the
+    process working directory, which is what ``Path("")`` would resolve to.
+    """
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    if raw and raw.strip():
+        return Path(raw.strip()).expanduser()
+    return Path.home() / ".claude"
+
+
 def get_config_path():
     """Return path to user config — stored under XDG_CONFIG_HOME, outside the repo."""
     if sys.platform == "win32":
@@ -915,6 +1116,10 @@ def load_config():
     # Clean up removed settings
     data.pop("rainbow_bars", None)
     data.pop("rainbow_mode", None)
+    # v3.2.0 removed the peak-hours widget. Drop the settings an older version
+    # may have written so they don't linger in --config output forever. The
+    # matching show flag is dropped below, once `show` has been read.
+    data.pop("peak_hours", None)
 
     # Apply defaults
     data.setdefault("cache_ttl_seconds", DEFAULT_CACHE_TTL)
@@ -932,17 +1137,20 @@ def load_config():
     data.setdefault("bar_style", DEFAULT_BAR_STYLE)
     data.setdefault("layout", DEFAULT_LAYOUT)
     data.setdefault("context_format", "percent")
+    data.setdefault("effort_format", DEFAULT_EFFORT_FORMAT)
+    data.setdefault("budget_usd", 0)
+    limits = data.get("limits", {})
+    if not isinstance(limits, dict):
+        limits = {}
+    for _k, _v in DEFAULT_LIMITS.items():
+        limits.setdefault(_k, _v)
+    data["limits"] = limits
     data.setdefault("extra_display", "auto")
     data.setdefault("multiline", False)
     if "currency" not in data:
         data["currency"] = _detect_default_currency()
-    peak = data.get("peak_hours", {})
-    peak.setdefault("enabled", True)
-    peak.setdefault("start", "13:00")
-    peak.setdefault("end", "19:00")
-    peak.setdefault("weekdays_only", True)
-    data["peak_hours"] = peak
     show = data.get("show", {})
+    show.pop("peak", None)  # v3.2.0 — widget removed
     for key, default in DEFAULT_SHOW.items():
         show.setdefault(key, default)
     data["show"] = show
@@ -954,6 +1162,14 @@ def save_config(config):
     # Only save user-facing keys, not internal ones
     save_data = {k: v for k, v in config.items() if not k.startswith("_")}
     _atomic_json_write(config_path, save_data)
+    # Toggling animation or a time-based widget changes whether the status line
+    # needs a repaint timer. Re-syncing here rather than at each of the ~20 CLI
+    # call sites means a new setting can never forget to do it. Never raises:
+    # a settings.json we can't touch must not fail an otherwise-good config save.
+    try:
+        sync_status_line_refresh(config)
+    except Exception:
+        pass
 
 
 def _cleanup_hooks():
@@ -966,7 +1182,7 @@ def _cleanup_hooks():
     marker = state_dir / "hooks_cleaned"
     if marker.exists():
         return
-    settings_path = Path.home() / ".claude" / "settings.json"
+    settings_path = _claude_config_dir() / "settings.json"
     try:
         with open(settings_path, "r", encoding="utf-8") as f:
             settings = json.load(f)
@@ -1115,10 +1331,21 @@ def hook_refresh(tool_name_arg):
     except OSError:
         pass
 
+    # The heartbeat becoming live (or going idle) changes whether the status
+    # line needs a repaint timer, and this hook fires at exactly those moments.
+    # Must run AFTER the state write above: the sync decides by reading the
+    # persisted state, so syncing first would judge a just-woken heartbeat by
+    # its stale on-disk timestamp and leave the timer unarmed. It is a no-op
+    # when the answer is unchanged, so this costs one small read per tool call.
+    try:
+        sync_status_line_refresh()
+    except Exception:
+        pass
+
 
 def install_hooks():
     """Install a PostToolUse hook into ~/.claude/settings.json."""
-    settings_path = Path.home() / ".claude" / "settings.json"
+    settings_path = _claude_config_dir() / "settings.json"
     script_path = _win_portable_path(Path(__file__).resolve())
     python_cmd = _get_python_cmd()
     settings = {}
@@ -1148,6 +1375,24 @@ def install_hooks():
             filtered.append(h)
     filtered.append(hook_entry)
     hooks["PostToolUse"] = filtered
+
+    # SubagentStart / SubagentStop drive the live agent counter. They carry
+    # agent_id and agent_type, so no polling is needed.
+    for event, flag in (("SubagentStart", "--hook-subagent-start"),
+                        ("SubagentStop", "--hook-subagent-stop")):
+        command = f'{python_cmd} "{script_path}" {flag}'
+        existing = hooks.setdefault(event, [])
+        kept = []
+        for h in existing:
+            is_pulse = any(
+                "claude_status.py" in inner.get("command", "") and flag in inner.get("command", "")
+                for inner in h.get("hooks", [])
+            )
+            if not is_pulse:
+                kept.append(h)
+        kept.append({"matcher": "", "hooks": [{"type": "command", "command": command}]})
+        hooks[event] = kept
+
     settings["hooks"] = hooks
     _secure_mkdir(settings_path.parent)
     _atomic_json_write(settings_path, settings)
@@ -1193,6 +1438,7 @@ def _clear_cache():
 # Update checker — compares local git HEAD to GitHub remote (cached 1 hour)
 # ---------------------------------------------------------------------------
 
+_UPDATE_CHECK_BUDGET = 6  # seconds; hard ceiling on one update check
 UPDATE_CHECK_TTL = 3600  # check at most once per hour
 GITHUB_REPO = "NoobyGains/claude-pulse"
 _GIT_PATH = shutil.which("git") or "git"  # resolve once at import time
@@ -1230,13 +1476,33 @@ def _detect_status_bar_conflict():
     return False
 
 
-def get_local_commit():
+def _capped_timeout(default, deadline):
+    """Cap *default* to the seconds left before *deadline* (an epoch).
+
+    Returns None when the budget is spent, so callers can skip a blocking
+    operation entirely instead of starting one they have no time for. This is
+    what makes _UPDATE_CHECK_BUDGET a real ceiling: checking the deadline only
+    *between* operations still lets each one run its full fixed timeout, and
+    the sum of those (~13s) is far past the advertised budget.
+    """
+    if deadline is None:
+        return default
+    remaining = deadline - time.time()
+    if remaining < 0.05:
+        return None
+    return min(default, remaining)
+
+
+def get_local_commit(deadline=None):
     """Get the local git HEAD commit hash (short). Returns None on failure."""
+    timeout = _capped_timeout(2, deadline)
+    if timeout is None:
+        return None
     repo_dir = Path(__file__).resolve().parent
     try:
         result = subprocess.run(
             [_GIT_PATH, "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=timeout,
             cwd=str(repo_dir),
         )
         if result.returncode == 0:
@@ -1246,15 +1512,45 @@ def get_local_commit():
     return None
 
 
-def get_remote_commit():
+def _on_default_branch(deadline=None):
+    """True when this checkout sits on main/master; False otherwise; None on error.
+
+    A checkout parked on a topic or preview branch is a developer or a preview
+    tester, and is typically *ahead* of upstream main — where "update
+    available" is not just noise but actively wrong. Detached HEADs are a
+    deliberate pin, not a plain tracking install, so they don't nag either.
+    """
+    timeout = _capped_timeout(2, deadline)
+    if timeout is None:
+        return None
+    repo_dir = Path(__file__).resolve().parent
+    try:
+        result = subprocess.run(
+            [_GIT_PATH, "symbolic-ref", "--short", "-q", "HEAD"],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=str(repo_dir),
+        )
+        if result.returncode == 1:
+            return False  # -q's documented "not a symbolic ref": detached HEAD
+        if result.returncode != 0:
+            return None  # broken repo/permissions — unknown, don't cache a verdict
+        return result.stdout.strip() in ("main", "master")
+    except Exception:
+        return None
+
+
+def get_remote_commit(deadline=None):
     """Fetch the latest commit hash from GitHub API. Returns None on failure."""
+    timeout = _capped_timeout(3, deadline)
+    if timeout is None:
+        return None
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
         req = urllib.request.Request(url, headers={
             "Accept": "application/vnd.github.sha",
             "User-Agent": "claude-pulse-update-checker",
         })
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             sha = resp.read(1024).decode().strip()
         if re.fullmatch(r'[0-9a-f]{40}', sha):
             return sha
@@ -1275,6 +1571,31 @@ def _check_update_cache(cache_file: Path, ttl: int) -> dict:
     return None
 
 
+def _git(*args, timeout=2, deadline=None):
+    """Run git in the install dir, returning stripped stdout or None.
+
+    The default timeout is deliberately short: these calls sit behind the
+    hourly update check, and several run in series, so a slow filesystem or a
+    hung git could otherwise stall a repaint for tens of seconds. *deadline*
+    caps it further to whatever remains of the caller's overall budget.
+    """
+    timeout = _capped_timeout(timeout, deadline)
+    if timeout is None:
+        return None
+    repo_dir = Path(__file__).resolve().parent
+    try:
+        result = subprocess.run(
+            [_GIT_PATH, *args],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=str(repo_dir),
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
 def _write_update_cache(cache_file: Path, data: dict) -> None:
     """Write update check result to cache with timestamp."""
     try:
@@ -1285,6 +1606,63 @@ def _write_update_cache(cache_file: Path, data: dict) -> None:
         pass
 
 
+def _tracks_upstream(deadline=None):
+    """True when this checkout's origin is the upstream claude-pulse repo.
+
+    A fork's origin points somewhere else, and its own commits are never on
+    upstream's main, so the plain ``local != remote`` comparison flagged an
+    update forever. Returns None when origin can't be read at all.
+    """
+    url = _git("remote", "get-url", "origin", timeout=3, deadline=deadline)
+    if url is None:
+        return None
+    owner_repo = GITHUB_REPO.lower()
+    normalised = url.lower().rstrip("/")
+    if normalised.endswith(".git"):
+        normalised = normalised[:-4]
+    # Matches both git@github.com:owner/repo and https://github.com/owner/repo
+    return normalised.endswith(owner_repo)
+
+
+def _remote_is_ancestor(remote, deadline=None):
+    """True when *remote* is already contained in local history (we're ahead).
+
+    Returns None when the commit isn't present locally, so ancestry can't be
+    decided without fetching — which the status line must never do.
+    """
+    if _git("cat-file", "-e", f"{remote}^{{commit}}", timeout=3,
+            deadline=deadline) is None:
+        return None
+    timeout = _capped_timeout(2, deadline)
+    if timeout is None:
+        return None
+    repo_dir = Path(__file__).resolve().parent
+    try:
+        result = subprocess.run(
+            [_GIT_PATH, "merge-base", "--is-ancestor", remote, "HEAD"],
+            capture_output=True, text=True, timeout=timeout, cwd=str(repo_dir),
+        )
+    except Exception:
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None  # any other status means git could not answer
+
+
+def _cache_age(cached):
+    """Age in seconds of a cache dict, or +inf when its timestamp is unusable.
+
+    Returning infinity makes a corrupt entry look infinitely stale, so callers
+    naturally fall through to a fresh check instead of raising on the subtraction.
+    """
+    try:
+        return time.time() - float(cached.get("timestamp", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return float("inf")
+
+
 def check_for_update():
     """Check if a newer version is available on GitHub. Returns True/False/None.
 
@@ -1293,32 +1671,113 @@ def check_for_update():
     state_dir = get_state_dir()
     update_cache = state_dir / "update_check.json"
 
-    # Get local commit first so we can validate cache
-    local = get_local_commit()
-    if not local:
-        return None  # not a git install, skip silently
+    # `git rev-parse HEAD` costs ~20ms, and it was previously run on every
+    # repaint purely to validate an hourly cache. Instead, stamp the cache with
+    # the script's mtime: if the file hasn't changed since the cache was
+    # written, the checkout hasn't moved either, so the cached verdict stands
+    # and git never runs. A pull rewrites claude_status.py and invalidates it.
+    try:
+        script_mtime = Path(__file__).resolve().stat().st_mtime
+    except OSError:
+        script_mtime = None
 
-    # Read cached result — skip if local version changed (e.g. after update)
+    cached = None
     try:
         with open(update_cache, "r", encoding="utf-8") as f:
             cached = json.load(f)
-        if (time.time() - cached.get("timestamp", 0) < UPDATE_CHECK_TTL
-                and cached.get("local") == local[:8]):
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        cached = None
+    if not isinstance(cached, dict):
+        cached = None
+
+    if cached and _cache_age(cached) < UPDATE_CHECK_TTL:
+        if script_mtime is not None and cached.get("script_mtime") == script_mtime:
             return cached.get("update_available", False)
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
+
+    # Cache is stale or unverifiable — now it's worth asking git. Everything
+    # from here is bounded by _UPDATE_CHECK_BUDGET: the deadline is threaded
+    # into every blocking call, capping each one's timeout to the budget that
+    # remains, so a slow git or a slow GitHub can never hold a repaint open
+    # for the sum of the individual timeouts.
+    _deadline = time.time() + _UPDATE_CHECK_BUDGET
+
+    local = get_local_commit(deadline=_deadline)
+    if not local:
+        return None  # not a git install, skip silently
+
+    if (cached
+            and _cache_age(cached) < UPDATE_CHECK_TTL
+            and cached.get("local") == local[:8]):
+        return cached.get("update_available", False)
+
+    # Only a main/master checkout gets the nag; topic and preview branches are
+    # developers, usually ahead of upstream. Cache the verdict — returning
+    # None uncached would re-run git on every repaint once the TTL lapses.
+    # Known tradeoff: the cache keys on commit + script mtime, not branch, so
+    # switching branches at the *same* commit serves the old verdict for up to
+    # one TTL. Keying on branch would cost a git subprocess per repaint.
+    on_default = _on_default_branch(deadline=_deadline)
+    if on_default is None:
+        return None
+    if not on_default:
+        try:
+            with _secure_open_write(update_cache) as f:
+                json.dump({
+                    "timestamp": time.time(),
+                    "update_available": False,
+                    "local": local[:8],
+                    "script_mtime": script_mtime,
+                }, f)
+        except OSError:
+            pass
+        return False
+
+    # A fork's own commits are never on upstream main, so a bare inequality
+    # would nag forever. Only ever prompt a checkout that actually tracks
+    # upstream (issue: forks false-positive on the update indicator).
+    if time.time() > _deadline:
+        return None
+    if _tracks_upstream(deadline=_deadline) is False:
+        return None
 
     # Perform the check
-    remote = get_remote_commit()
+    if time.time() > _deadline:
+        return None
+    remote = get_remote_commit(deadline=_deadline)
     if not remote:
         return None  # network error, skip silently
 
-    update_available = local != remote
-    _write_update_cache(update_cache, {
-        "update_available": update_available,
-        "local": local[:8],
-        "remote": remote[:8],
-    })
+    if local == remote:
+        update_available = False
+    else:
+        ancestor = _remote_is_ancestor(remote, deadline=_deadline)
+        if ancestor is None:
+            if _deadline - time.time() < 0.05:
+                # The budget ran out mid-ancestry-check: that is a lack of
+                # time, not of information. Caching the pessimistic guess
+                # would pin a false "update available" on an ahead-of-main
+                # checkout for an hour, so skip silently and retry next time.
+                return None
+            # Can't decide locally (commit not fetched) — fall back to the
+            # simple comparison, which is right for a plain tracking install.
+            update_available = True
+        else:
+            # We're only behind when upstream's tip is NOT already in our history.
+            update_available = not ancestor
+
+    # Cache the result
+    try:
+        with _secure_open_write(update_cache) as f:
+            json.dump({
+                "timestamp": time.time(),
+                "update_available": update_available,
+                "local": local[:8],
+                "remote": remote[:8],
+                "script_mtime": script_mtime,
+            }, f)
+    except OSError:
+        pass
+
     return update_available
 
 
@@ -1336,29 +1795,36 @@ def append_update_indicator(line, config=None):
     return line
 
 
-def check_claude_code_update():
+def check_claude_code_update(local_version=None):
     """Check if a newer Claude Code version is available on npm. Returns True/False/None.
 
     Cached for 1 hour. Fully silent on any error — never blocks the status line.
-    """
-    if not _CLAUDE_PATH:
-        return None
 
+    *local_version* is the running version, which Claude Code reports on stdin.
+    Passing it matters for latency: resolving it by shelling out to
+    ``claude --version`` costs ~80ms, and because the version is needed to
+    validate the cache, that subprocess used to run on *every* repaint — by far
+    the most expensive thing the status line did. The subprocess remains as a
+    fallback for older Claude Code builds that don't send the field.
+    """
     state_dir = get_state_dir()
     update_cache = state_dir / "claude_code_update.json"
 
-    # Get installed version first so we can validate cache
-    try:
-        result = subprocess.run(
-            [_CLAUDE_PATH, "--version"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if result.returncode != 0:
+    local_version = _sanitize(str(local_version or "")).strip()
+    if not local_version:
+        if not _CLAUDE_PATH:
             return None
-        # Parse "2.1.37 (Claude Code)" → "2.1.37"
-        local_version = result.stdout.strip().split()[0]
-    except Exception:
-        return None
+        try:
+            result = subprocess.run(
+                [_CLAUDE_PATH, "--version"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode != 0:
+                return None
+            # Parse "2.1.37 (Claude Code)" → "2.1.37"
+            local_version = result.stdout.strip().split()[0]
+        except Exception:
+            return None
 
     # Read cached result — skip if local version changed (e.g. after claude update)
     try:
@@ -1393,14 +1859,14 @@ def check_claude_code_update():
     return update_available
 
 
-def append_claude_update_indicator(line, config=None):
+def append_claude_update_indicator(line, config=None, stdin_ctx=None):
     """Append a visible Claude Code update indicator if a newer version is available."""
     try:
         if config:
             show = config.get("show", DEFAULT_SHOW)
             if not show.get("claude_update", True):
                 return line
-        if check_claude_code_update():
+        if check_claude_code_update((stdin_ctx or {}).get("cc_version")):
             return line + f" {BRIGHT_YELLOW}\u2191 Claude Update{RESET}"
     except Exception:
         pass  # never break the status line for an update check
@@ -1582,29 +2048,31 @@ _RATE_LIMIT_CACHE_TTL = 120  # seconds — back off longer on 429 to avoid retry
 
 
 def read_cache(cache_path, ttl):
-    """Return the full cache dict if fresh, else None.
-
-    Freshness rules (checked in order):
-    1. Rate-limited: if _rate_limit_until is in the future, serve stale data
-       to avoid hammering the API during backoff
-    2. Fetch-failed: if _fetch_failed=True and age < 3s, force retry
-    3. Normal TTL: if age < ttl, serve cached data
-    """
+    """Return the full cache dict if fresh, else None."""
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             cached = json.load(f)
-        ts = cached.get("timestamp", 0)
-        age = time.time() - ts
-
-        # Rate limit backoff — serve stale data during backoff period
-        rate_limit_until = cached.get("_rate_limit_until", 0)
-        if rate_limit_until and time.time() < rate_limit_until:
-            return cached
-
-        # If previous fetch failed (non-429), retry aggressively
-        failed = cached.get("_fetch_failed", False)
-        if failed and age < 3:
+        # Same untrusted-shape rule as read_cache: this feeds the 429 fallback,
+        # where a raise means no status line at all.
+        if not isinstance(cached, dict):
             return None
+        # The file is ours, but it is still untrusted input: a truncated write,
+        # a disk error, or a hand-edit can leave valid JSON of the wrong shape.
+        # Anything other than a dict is treated as a cache miss rather than
+        # allowed to raise — read_cache sits on the hot path, so an exception
+        # here blanks the status bar.
+        if not isinstance(cached, dict):
+            return None
+        # An active 429 backoff wins over the normal TTL: keep serving what we
+        # have until the backoff expires. Without this, a rate-limited session
+        # that still had usable cached usage re-hit the API on every refresh —
+        # exactly the retry storm the backoff exists to prevent.
+        try:
+            blocked_until = float(cached.get("rate_limited_until") or 0)
+        except (TypeError, ValueError):
+            blocked_until = 0
+        if blocked_until and time.time() < blocked_until:
+            return cached
         # Error-only entries expire faster, except rate limit errors which back off longer
         if "usage" in cached:
             effective_ttl = ttl
@@ -1612,9 +2080,13 @@ def read_cache(cache_path, ttl):
             effective_ttl = _RATE_LIMIT_CACHE_TTL
         else:
             effective_ttl = _ERROR_CACHE_TTL
+        try:
+            age = time.time() - float(cached.get("timestamp", 0) or 0)
+        except (TypeError, ValueError):
+            return None  # unusable timestamp — treat as a miss
         if age < effective_ttl:
             return cached
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, OSError):
         pass
     return None
 
@@ -1629,44 +2101,83 @@ def _read_stale_cache(cache_path):
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             cached = json.load(f)
+        # Same untrusted-shape rule as read_cache. This one feeds the 429
+        # fallback, where raising means no status line is printed at all:
+        # a cache file containing bare `42` made `"usage" in cached` raise.
+        if not isinstance(cached, dict):
+            return None
         if "usage" in cached or "line" in cached:
             return cached
-    except (FileNotFoundError, json.JSONDecodeError, KeyError, OSError):
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, OSError, TypeError):
         pass
     return None
 
 
-_USAGE_CACHE_KEYS = {"five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "extra_usage"}
+_USAGE_CACHE_KEYS = {
+    "five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet",
+    "seven_day_fable", "extra_usage",
+}
 
-def write_cache(cache_path, line, usage=None, plan=None, user=None,
-                fetch_failed=False, rate_limit_until=0, fail_count=0):
-    """Write cache with optional failure/rate-limit markers for intelligent retry."""
+def write_cache(cache_path, line, usage=None, plan=None,
+                rate_limited_until=None, rate_limit_fails=None,
+                data_timestamp=None, user=None):
+    """Persist the rendered line plus optional usage/plan and 429 backoff state.
+
+    ``rate_limited_until`` is an epoch after which it is worth calling the API
+    again; ``rate_limit_fails`` is the consecutive-429 count that produced it.
+    Both are omitted on a normal write, which is what clears the backoff once a
+    request succeeds.
+
+    ``data_timestamp`` is the epoch the usage was actually fetched. The 429
+    fallback re-writes usage it just read from a stale cache, and stamping
+    that copy with the current time made old quota data look freshly fetched
+    on every failed retry — the staleness warning could never fire.
+
+    ``user`` is the display name for the user segment. It is cached so stdin
+    and cache repaints skip the profile request.
+    """
     try:
-        data = {"timestamp": time.time(), "line": line}
-        if usage is not None:
+        data = {"timestamp": data_timestamp or time.time(), "line": line}
+        # `usage` can arrive from a stale cache file (the 429 fallback path
+        # re-writes what it just read), so it is not guaranteed to be a dict.
+        if isinstance(usage, dict):
             data["usage"] = {k: v for k, v in usage.items() if k in _USAGE_CACHE_KEYS}
         if plan is not None:
             data["plan"] = plan
         if user is not None:
             data["user"] = user
-        if fetch_failed:
-            data["_fetch_failed"] = True
-        if rate_limit_until > 0:
-            data["_rate_limit_until"] = rate_limit_until
-            data["_fail_count"] = fail_count
+        if rate_limited_until:
+            data["rate_limited_until"] = rate_limited_until
+            data["rate_limited"] = True
+        if rate_limit_fails:
+            data["rate_limit_fails"] = rate_limit_fails
         with _secure_open_write(cache_path) as f:
             json.dump(data, f)
     except OSError:
         pass
 
 
-def _read_stale_cache(cache_path):
-    """Read cache regardless of TTL, for stale data recovery during rate limiting"""
+_RATE_LIMIT_BACKOFF_BASE = 60    # seconds for the first 429
+_RATE_LIMIT_BACKOFF_MAX = 900    # cap at 15 minutes
+_RATE_LIMIT_JITTER = 10          # spread concurrent sessions out
+
+
+def _rate_limit_backoff(fail_count):
+    """Return (seconds_to_wait, next_fail_count) for a 429.
+
+    Doubles per consecutive failure up to a cap, plus jitter so several Claude
+    Code windows that were rate-limited together don't all retry on the same
+    tick and re-trigger the limit.
+    """
     try:
-        with open(cache_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
+        fails = max(0, int(fail_count or 0)) + 1
+    except (TypeError, ValueError):
+        fails = 1
+    # Cap the shift before computing the power: 2 ** a large fail count would
+    # build a huge int before min() ever saw it.
+    delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** min(fails - 1, 8))
+    delay = min(delay, _RATE_LIMIT_BACKOFF_MAX)
+    return delay + random.uniform(0, _RATE_LIMIT_JITTER), fails
 
 
 # ---------------------------------------------------------------------------
@@ -1714,7 +2225,7 @@ def _authorized_request(url, token, headers=None, data=None, method=None, timeou
 def _read_credential_data():
     """Read raw credential data from file or macOS Keychain. Returns (dict, source)."""
     # 1. File-based (~/.claude/.credentials.json)
-    creds_path = Path.home() / ".claude" / ".credentials.json"
+    creds_path = _claude_config_dir() / ".credentials.json"
     try:
         with open(creds_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -1742,22 +2253,16 @@ def _read_credential_data():
 
 
 def _extract_credentials(data):
-    """Extract token, plan, and user info from credential data dict."""
+    """Extract token and plan from credential data dict."""
     if not data:
-        return None, None, None
+        return None, None
     oauth = data.get("claudeAiOauth", {})
     token = oauth.get("accessToken")
     tier = oauth.get("rateLimitTier", "")
     if not token:
-        return None, None, None
+        return None, None
     plan = PLAN_NAMES.get(tier, _sanitize(tier.replace("default_claude_", "").replace("_", " ").title()))
-    # Try to extract user name from OAuth data
-    user = None
-    for key in ("name", "user_name", "display_name"):
-        if oauth.get(key):
-            user = _sanitize(oauth.get(key))
-            break
-    return token, plan, user
+    return token, plan
 
 
 
@@ -1781,19 +2286,19 @@ def _refresh_oauth_token(refresh_token):
 
 
 def get_credentials():
-    """Read OAuth token, plan, and user from credentials file, macOS Keychain, or env var."""
+    """Read OAuth token from credentials file, macOS Keychain, or env var."""
     data, source = _read_credential_data()
     if data:
-        token, plan, user = _extract_credentials(data)
+        token, plan = _extract_credentials(data)
         if token:
-            return token, plan, user
+            return token, plan
 
     # Environment variable fallback (all platforms)
     env_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     if env_token:
-        return env_token, "", None
+        return env_token, ""
 
-    return None, None, None
+    return None, None
 
 
 def refresh_and_retry(plan):
@@ -1815,6 +2320,58 @@ def refresh_and_retry(plan):
     return token_data["access_token"], plan
 
 
+def _normalize_usage(usage):
+    """Fold model-scoped weekly caps out of ``limits[]`` into top-level keys.
+
+    Alongside the flat ``seven_day_opus`` / ``seven_day_sonnet`` fields, the
+    oauth/usage payload carries a ``limits`` list describing per-model weekly
+    budgets::
+
+        {"kind": "weekly_scoped", "percent": 82, "resets_at": "...",
+         "scope": {"model": {"display_name": "Fable"}}}
+
+    Mapping those to ``seven_day_<name>`` lets the renderer treat a Fable cap
+    exactly like the Opus and Sonnet ones, and picks up any future model
+    without another code change. A flat field that already carries a
+    utilization always wins — this only fills gaps.
+    """
+    if not isinstance(usage, dict):
+        return usage
+    limits = usage.get("limits")
+    if not isinstance(limits, list):
+        return usage
+    for entry in limits:
+        if not isinstance(entry, dict) or entry.get("kind") != "weekly_scoped":
+            continue
+        scope = entry.get("scope")
+        model = scope.get("model") if isinstance(scope, dict) else None
+        if not isinstance(model, dict):
+            continue
+        name = model.get("display_name") or model.get("id")
+        if not name:
+            continue
+        # "Fable" → seven_day_fable; "Sonnet 4.6" → seven_day_sonnet_4_6
+        slug = re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+        if not slug:
+            continue  # e.g. display_name "!!!" — would yield a bare "seven_day_"
+        key = "seven_day_" + slug
+        existing = usage.get(key)
+        if isinstance(existing, dict) and existing.get("utilization") is not None:
+            continue
+        pct = entry.get("percent")
+        if pct is None:
+            continue
+        try:
+            utilization = float(pct)
+        except (TypeError, ValueError):
+            continue
+        usage[key] = {
+            "utilization": utilization,
+            "resets_at": entry.get("resets_at"),
+        }
+    return usage
+
+
 def fetch_usage(token):
     """Fetch usage data from Anthropic API with schema validation."""
     with _authorized_request(
@@ -1822,13 +2379,7 @@ def fetch_usage(token):
         token,
         headers={"anthropic-beta": "oauth-2025-04-20", "Accept": "application/json"},
     ) as resp:
-        data = json.loads(resp.read(100_000))  # 100 KB max (typical response ~2-5 KB)
-
-    # Validate expected structure
-    required_keys = {"five_hour", "seven_day", "extra_usage"}
-    if not required_keys.issubset(data.keys()):
-        raise ValueError(f"Unexpected API schema: missing keys {required_keys - set(data.keys())}")
-    return data
+        return _normalize_usage(json.loads(resp.read(1_000_000)))  # 1 MB max
 
 
 def fetch_user_info(token):
@@ -2548,93 +3099,6 @@ def _format_context_warning(ctx_pct, theme):
     return None, None
 
 
-PEAK_DISPLAYS = ("full", "minimal")
-DEFAULT_PEAK_DISPLAY = "full"
-
-
-def _fmt_peak_time(hhmm_str, clock="12h"):
-    """Format a HH:MM string as 12h (1pm) or 24h (13:00)."""
-    try:
-        h, m = int(hhmm_str.split(":")[0]), int(hhmm_str.split(":")[1])
-        if clock == "12h":
-            if h == 0:
-                return "12am"
-            elif h < 12:
-                return f"{h}am"
-            elif h == 12:
-                return "12pm"
-            else:
-                return f"{h - 12}pm"
-        return hhmm_str
-    except (ValueError, IndexError):
-        return hhmm_str
-
-
-def _check_peak_hours(config, plan=None):
-    """Check peak hours status. Returns (is_peak, display_str).
-
-    Full mode:
-      In peak:      'In Peak ⚡ 2h left (1pm-7pm)'   RED — burning limits faster
-      Approaching:  'Peak ⚡ in 45m'                  YELLOW — heads up
-      Off-peak:     'Off-Peak ✓'                      GREEN — limits stretch further
-
-    Minimal mode:
-      In peak:      '⚡ Peak 2h'
-      Approaching:  '⚡ 45m'
-      Off-peak:     '✓ Off-Peak'
-
-    Per Anthropic's published policy, peak applies on weekdays only — Saturdays
-    and Sundays are always off-peak. Users can opt out by setting
-    peak_hours.weekdays_only = false in their config.
-    """
-    # Pro/Max on Claude Code no longer have peak throttling
-    # (removed 2026-05-06, anthropic.com/news/higher-limits-spacex)
-    if plan in ("Pro", "Max"):
-        return False, ""
-    peak = config.get("peak_hours", {})
-    if not peak.get("enabled", True):
-        return False, ""
-    try:
-        start_str = peak.get("start", "13:00")
-        end_str = peak.get("end", "19:00")
-        clock = config.get("clock_format", "12h")
-        display_mode = peak.get("display", DEFAULT_PEAK_DISPLAY)
-        minimal = display_mode == "minimal"
-        weekdays_only = peak.get("weekdays_only", True)
-        sh, sm = int(start_str.split(":")[0]), int(start_str.split(":")[1])
-        eh, em = int(end_str.split(":")[0]), int(end_str.split(":")[1])
-        now = datetime.now()
-        # Mon=0..Fri=4 weekdays; Sat=5, Sun=6 weekends.
-        if weekdays_only and now.weekday() >= 5:
-            return False, "✓ Off-Peak" if minimal else "Off-Peak ✓"
-        now_mins = now.hour * 60 + now.minute
-        start_mins = sh * 60 + sm
-        end_mins = eh * 60 + em
-        start_display = _fmt_peak_time(start_str, clock)
-        end_display = _fmt_peak_time(end_str, clock)
-
-        if start_mins <= now_mins < end_mins:
-            left = end_mins - now_mins
-            left_str = f"{left // 60}h {left % 60}m" if left >= 60 else f"{left}m"
-            if minimal:
-                return True, f"\u26a1 {left_str}"
-            return True, f"In Peak \u26a1 {left_str} left ({start_display}-{end_display})"
-
-        if now_mins < start_mins:
-            until = start_mins - now_mins
-            if until <= 120:
-                until_str = f"{until // 60}h {until % 60}m" if until >= 60 else f"{until}m"
-                if minimal:
-                    return False, f"\u26a1 {until_str}"
-                return False, f"Peak \u26a1 in {until_str}"
-
-        if minimal:
-            return False, "\u2713 Off-Peak"
-        return False, "Off-Peak \u2713"
-    except (ValueError, AttributeError):
-        return False, ""
-
-
 def _get_status_message(pct, velocity=None):
     """Return a (message, severity) tuple based on usage percentage and velocity.
 
@@ -2754,7 +3218,7 @@ def _calculate_streak(daily_dates, today):
         if d_ord == check_ord:
             current_streak += 1
             check_ord -= 1
-        elif d_ord == check_ord + 1 and current_streak == 0:
+        elif d_ord == check_ord - 1 and current_streak == 0:
             # Today not logged yet, start from yesterday
             current_streak = 1
             check_ord = d_ord - 1
@@ -2829,6 +3293,41 @@ def _get_streak_display(config, stats):
 _CUMULATIVE_COST_CACHE_TTL = 300  # 5 minutes
 _cumulative_cost_mem = {"ts": 0, "data": {}}
 
+_WEEKLY_COST_CACHE_TTL = 300  # 5 minutes
+_WEEKLY_COST_WINDOW = 7 * 86400
+_weekly_cost_mem = {"ts": 0, "data": {}}
+
+
+def _get_cached_weekly_cost():
+    """Rolling 7-day API-equivalent cost, with the same two-tier cache as the
+    cumulative figure: in-memory for the hot path, then a 5-minute disk cache
+    so a full transcript scan runs at most twice per refresh window.
+    """
+    now = time.time()
+
+    if now - _weekly_cost_mem["ts"] < _WEEKLY_COST_CACHE_TTL:
+        return _weekly_cost_mem["data"]
+
+    cache_path = get_state_dir() / "weekly_cost_cache.json"
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if now - cached.get("timestamp", 0) < _WEEKLY_COST_CACHE_TTL:
+            _weekly_cost_mem["ts"] = now
+            _weekly_cost_mem["data"] = cached.get("data", {})
+            return _weekly_cost_mem["data"]
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+    data = _scan_session_costs(since_ts=now - _WEEKLY_COST_WINDOW)
+    _weekly_cost_mem["ts"] = now
+    _weekly_cost_mem["data"] = data
+    try:
+        _atomic_json_write(cache_path, {"timestamp": now, "data": data}, indent=None)
+    except OSError:
+        pass
+    return data
+
 
 def _get_cached_cumulative_cost():
     """Return cumulative cost data with in-memory + 5-minute disk cache."""
@@ -2860,14 +3359,41 @@ def _get_cached_cumulative_cost():
     return data
 
 
-def _scan_session_costs():
-    """Scan all Claude Code session JSONL transcripts and calculate API-equivalent costs.
+def _parse_transcript_ts(value):
+    """Parse a transcript entry's ISO-8601 timestamp to a UTC epoch float.
+
+    Claude Code writes them Z-suffixed ("2026-07-18T15:01:07.532Z").
+    ``datetime.fromisoformat`` only learned to accept "Z" in Python 3.11, and
+    claude-pulse supports 3.8, so normalise it to an explicit offset first.
+    Returns None for anything unparseable.
+    """
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        text = value.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _scan_session_costs(since_ts=None):
+    """Scan Claude Code session JSONL transcripts for API-equivalent costs.
 
     Returns a dict with per-model cost/token breakdown, totals, session count,
     and the earliest file mtime seen.
+
+    When *since_ts* (a UTC epoch float) is given, only entries stamped at or
+    after it are counted, which is what the rolling weekly-cost widget needs.
+    Files whose mtime predates the cutoff are skipped outright — they cannot
+    contain newer entries — but the per-entry timestamp is still checked,
+    because a file touched today may hold months of history.
     """
-    home = Path.home()
-    projects_dir = home / ".claude" / "projects"
+    projects_dir = _claude_config_dir() / "projects"
 
     models: dict = {}
     total_cost_usd = 0.0
@@ -2890,6 +3416,14 @@ def _scan_session_costs():
         jsonl_files = []
 
     for jsonl_path in jsonl_files:
+        # Cheap prefilter: a file untouched since the cutoff has nothing new.
+        try:
+            mtime = jsonl_path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if since_ts is not None and mtime is not None and mtime < since_ts:
+            continue
+
         # Count sessions: top-level JSONL files only (not inside subagents/ dirs)
         path_parts = jsonl_path.parts
         is_subagent = any(p == "subagents" for p in path_parts)
@@ -2897,12 +3431,8 @@ def _scan_session_costs():
             session_count += 1
 
         # Track earliest file mtime
-        try:
-            mtime = jsonl_path.stat().st_mtime
-            if first_seen_ts is None or mtime < first_seen_ts:
-                first_seen_ts = mtime
-        except OSError:
-            pass
+        if mtime is not None and (first_seen_ts is None or mtime < first_seen_ts):
+            first_seen_ts = mtime
 
         # Parse each line
         try:
@@ -2922,17 +3452,41 @@ def _scan_session_costs():
                         usage = msg.get("usage", {})
                         if not usage or "input_tokens" not in usage:
                             continue
+                        entry_ts = _parse_transcript_ts(entry.get("timestamp"))
+                        if since_ts is not None:
+                            # Drop undated entries too: counting them would
+                            # inflate a "last 7 days" figure with history.
+                            if entry_ts is None or entry_ts < since_ts:
+                                continue
+                        # Price at the rates in force when the entry was made,
+                        # not on the scan day — otherwise a promo's expiry
+                        # retroactively reprices every turn from the promo era.
+                        # Undated entries fall back to today inside _pricing_for.
+                        entry_date = None
+                        if entry_ts is not None:
+                            try:
+                                entry_date = datetime.fromtimestamp(
+                                    entry_ts, tz=timezone.utc
+                                ).date()
+                            except (OSError, OverflowError, ValueError):
+                                pass
                         model_id = msg.get("model", "")
                         # Normalise: strip version suffix variants for matching
-                        # e.g. "claude-sonnet-4-5-20251022" → "claude-sonnet-4-5"
-                        pricing = API_PRICING.get(model_id)
+                        # e.g. "claude-sonnet-4-5-20251022" → "claude-sonnet-4-5".
+                        # Longest prefix wins — a first-match scan would let the
+                        # bare "claude-opus-4" key ($15/$75) swallow
+                        # "claude-opus-4-8" ($5/$25) and treble the reported cost.
+                        pricing = _pricing_for(model_id, entry_date)
                         if pricing is None:
-                            # Try prefix match (handles dated variants)
+                            best_key = None
                             for key in API_PRICING:
-                                if model_id.startswith(key):
-                                    pricing = API_PRICING[key]
-                                    model_id = key
-                                    break
+                                if model_id.startswith(key) and (
+                                    best_key is None or len(key) > len(best_key)
+                                ):
+                                    best_key = key
+                            if best_key is not None:
+                                pricing = _pricing_for(best_key, entry_date)
+                                model_id = best_key
                         if pricing is None:
                             continue
 
@@ -3042,7 +3596,10 @@ def cmd_stats():
                 f"{BRIGHT_YELLOW}{cost_str:<12}{RESET}{DIM}({tok_str}){RESET}"
             )
 
-        utf8_print(f"    {DIM}{'\u2500' * 33}{RESET}")
+        # Built outside the f-string: a backslash escape inside an f-string
+        # expression is a SyntaxError before Python 3.12 (PEP 701).
+        _sep = "\u2500" * 33
+        utf8_print(f"    {DIM}{_sep}{RESET}")
         total_local = cost_data["total_cost_usd"] * rate
         utf8_print(f"    {'Total:':<{max_name_len + 2}}  {BOLD}{BRIGHT_YELLOW}{currency_sym}{total_local:,.2f}{RESET}")
         utf8_print("")
@@ -3084,6 +3641,39 @@ def _parse_stdin_context(raw_stdin):
 
     result = {}
 
+    # Is this a full repaint payload rather than a fragment? Claude Code always
+    # sends the session identity fields on a real status refresh, so their
+    # presence means an omitted session-state field genuinely means "off", not
+    # "unknown". Without this, a field that is simply dropped when inactive
+    # (rather than sent as false) could never clear the badge it set, because
+    # the persistence layer treats absent as unchanged.
+    try:
+        _payload = data.get("data", data)
+        _full = isinstance(_payload, dict) and any(
+            k in _payload for k in ("session_id", "model", "workspace", "transcript_path")
+        )
+    except (AttributeError, TypeError):
+        _payload, _full = {}, False
+    if _full:
+        # The session's own identity, used to scope per-session widgets (the
+        # subagent counter) to the window being painted. Deliberately absent
+        # from _STDIN_CTX_KEYS: persisting it would hand this session's id to
+        # every other session's fragment repaints.
+        sid = _sanitize(str(_payload.get("session_id") or ""))[:64]
+        if sid:
+            result["session_id"] = sid
+        # Defaults for session state; each block below overwrites when present.
+        result["fast_mode"] = False
+        result["effort"] = None
+        result["thinking"] = None
+        result["agent_name"] = None
+        result["pr_number"] = None
+        result["pr_url"] = None
+        result["pr_review_state"] = None
+        result["pr_kind"] = None
+        result["cache_hit_pct"] = None
+        result["cache_read_tokens"] = None
+
     # Model name
     try:
         model = data.get("data", data).get("model", {})
@@ -3095,7 +3685,8 @@ def _parse_stdin_context(raw_stdin):
         else:
             model_id = model.get("id", "")
             if model_id:
-                result["model_name"] = MODEL_SHORT_NAMES.get(model_id, _sanitize(model_id.split("-")[-1].title()))
+                short = _model_short_name(model_id)
+                result["model_name"] = short or _sanitize(model_id.split("-")[-1].title())
     except (AttributeError, KeyError):
         pass
 
@@ -3129,6 +3720,106 @@ def _parse_stdin_context(raw_stdin):
     except (AttributeError, KeyError, ValueError, TypeError):
         pass
 
+    # Running Claude Code version. Used by the update check so it doesn't have
+    # to shell out to `claude --version` on every repaint.
+    try:
+        version = data.get("data", data).get("version")
+        if version:
+            result["cc_version"] = _sanitize(str(version))
+    except (AttributeError, KeyError, TypeError):
+        pass
+
+    # Reasoning effort, fast mode and thinking state.
+    #
+    # Claude Code reports the session's effort on stdin as `effort.level`.
+    # Earlier versions of claude-pulse read a CLAUDE_CODE_EFFORT_LEVEL
+    # environment variable instead, which Claude Code does not actually export
+    # — so the effort widget only ever rendered for users who happened to set
+    # that variable by hand. stdin is the real source; the env var is kept
+    # below as a fallback for anyone relying on the old behaviour.
+    # These are *session state*, not accumulating facts: each can be switched
+    # off again mid-session. Record the value whenever the field is present —
+    # including the off value — because the persistence layer below treats an
+    # absent key as "unchanged". Recording only the on value meant a badge
+    # could never be cleared: toggle fast mode on once and the ⚡fast marker
+    # stuck forever, even as Claude Code reported fast_mode: false.
+    try:
+        payload = data.get("data", data)
+        if "effort" in payload:
+            effort = payload.get("effort")
+            level = ""
+            if isinstance(effort, dict):
+                level = _sanitize(str(effort.get("level") or ""))
+            result["effort"] = level if level and level != "unset" else None
+        if "fast_mode" in payload:
+            result["fast_mode"] = payload.get("fast_mode") is True
+        if "thinking" in payload:
+            thinking = payload.get("thinking")
+            if isinstance(thinking, dict) and thinking.get("enabled") is not None:
+                result["thinking"] = bool(thinking.get("enabled"))
+            else:
+                result["thinking"] = None
+    except (AttributeError, KeyError, TypeError, ValueError):
+        pass
+
+    # Active subagent (agent.name) — present while a subagent drives the turn.
+    try:
+        agent = data.get("data", data).get("agent")
+        if isinstance(agent, dict):
+            name = _sanitize(agent.get("name", ""))
+            if name:
+                result["agent_name"] = name
+    except (AttributeError, KeyError, TypeError):
+        pass
+
+    # Pull request context (number / url / review_state). Also session state:
+    # switching off a PR branch must clear the badge, so an explicitly absent
+    # or empty `pr` clears rather than leaving the previous one pinned.
+    try:
+        payload = data.get("data", data)
+        pr = payload.get("pr")
+        if "pr" in payload and not (isinstance(pr, dict) and pr.get("number") is not None):
+            result["pr_number"] = None
+            result["pr_url"] = None
+            result["pr_review_state"] = None
+            result["pr_kind"] = None
+        if isinstance(pr, dict) and pr.get("number") is not None:
+            result["pr_number"] = int(pr["number"])
+            url = _sanitize(pr.get("url", ""))
+            # Only accept http(s) — the URL is embedded in an OSC 8 hyperlink,
+            # so a javascript:/file: scheme must never reach the terminal.
+            if url.startswith(("https://", "http://")):
+                result["pr_url"] = url
+            # review_state and kind must be written even when absent: the
+            # persistence layer treats a missing key as "unchanged", so a
+            # GitHub PR arriving after a GitLab MR (kind omitted ⇒ GitHub)
+            # would otherwise keep rendering the stale !N marker, and a PR
+            # whose review disappeared would keep its old glyph.
+            state = _sanitize(pr.get("review_state", ""))
+            result["pr_review_state"] = state if state else None
+            # v2.1.234+: "mr" marks a GitLab merge request, so the badge can
+            # use GitLab's !N notation instead of #N.
+            kind = _sanitize(pr.get("kind", ""))
+            result["pr_kind"] = kind if kind else None
+    except (AttributeError, KeyError, TypeError, ValueError):
+        pass
+
+    # Cache efficiency from the current_usage breakdown. cache_read is billed
+    # at ~0.1x input, so the share of input served from cache is the single
+    # most useful cost signal available on stdin.
+    try:
+        cur = data.get("data", data).get("context_window", {}).get("current_usage", {})
+        if isinstance(cur, dict):
+            cache_read = int(cur.get("cache_read_input_tokens") or 0)
+            cache_creation = int(cur.get("cache_creation_input_tokens") or 0)
+            fresh_input = int(cur.get("input_tokens") or 0)
+            billable = cache_read + cache_creation + fresh_input
+            if billable > 0:
+                result["cache_read_tokens"] = cache_read
+                result["cache_hit_pct"] = (cache_read / billable) * 100.0
+    except (AttributeError, KeyError, TypeError, ValueError):
+        pass
+
     # Worktree (v2.1.69+)
     try:
         wt = data.get("data", data).get("worktree", {})
@@ -3142,23 +3833,31 @@ def _parse_stdin_context(raw_stdin):
     except (AttributeError, KeyError):
         pass
 
-    # Effort level (v2.1.x) - Claude Code sends it on stdin, not via env var
-    try:
-        effort = data.get("data", data).get("effort", {})
-        level = _sanitize(effort.get("level", ""))
-        if level:
-            result["effort"] = level
-    except (AttributeError, KeyError):
-        pass
-
     # Rate limits from stdin (v2.1.80+) — eliminates need for OAuth API call
     try:
         rl = data.get("data", data).get("rate_limits", {})
         if rl:
             result["_rate_limits"] = {}
-            for window in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
-                w = rl.get(window)
-                if w and w.get("used_percentage") is not None:
+            # Take the two fixed windows plus every model-scoped weekly cap
+            # Claude Code reports (seven_day_opus, seven_day_sonnet,
+            # seven_day_fable, ...). Enumerating rather than hardcoding means a
+            # new model shows up without another release — the previous fixed
+            # tuple silently dropped Fable.
+            windows = ["five_hour", "seven_day"]
+            windows += sorted(
+                k for k in rl
+                if isinstance(k, str) and k.startswith("seven_day_")
+            )
+            for window in windows:
+                # Guard each window separately. Sharing one try/except across
+                # the loop meant a single unparseable `used_percentage` aborted
+                # it and silently dropped every window after the bad one — the
+                # weekly and per-model bars would vanish because of one field.
+                try:
+                    w = rl.get(window)
+                    if not isinstance(w, dict) or w.get("used_percentage") is None:
+                        continue
+                    utilization = float(w["used_percentage"])
                     # Convert Unix epoch seconds to ISO string for compatibility
                     # with existing format_reset_time / format_weekly_reset
                     resets_at = w.get("resets_at")
@@ -3168,12 +3867,14 @@ def _parse_stdin_context(raw_stdin):
                             resets_iso = datetime.fromtimestamp(
                                 float(resets_at), tz=timezone.utc
                             ).isoformat()
-                        except (ValueError, OSError):
+                        except (ValueError, OSError, OverflowError, TypeError):
                             pass
                     result["_rate_limits"][window] = {
-                        "utilization": float(w["used_percentage"]),
+                        "utilization": utilization,
                         "resets_at": resets_iso,
                     }
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    continue
     except (AttributeError, KeyError, ValueError, TypeError):
         pass
 
@@ -3214,8 +3915,12 @@ def _parse_stdin_context(raw_stdin):
             # schema. Only override if stdin didn't already provide rate_limits.
             if not result.get("_rate_limits"):
                 try:
+                    # npm installs mmx as a .cmd shim on Windows, which
+                    # subprocess won't auto-resolve (only .exe) — resolve it
+                    # like _GIT_PATH/_CLAUDE_PATH above.
                     mmx_proc = subprocess.run(
-                        ["mmx", "quota", "show", "--output", "json", "--quiet"],
+                        [shutil.which("mmx") or "mmx",
+                         "quota", "show", "--output", "json", "--quiet"],
                         capture_output=True, text=True, timeout=3,
                     )
                     if mmx_proc.returncode == 0:
@@ -3674,6 +4379,10 @@ def _render_pomodoro(pomo, theme, bar_width=8):
         try:
             pomo["active"] = False
             _write_pomodoro(pomo)
+            # The countdown just left the screen; without this the 15s
+            # repaint timer it asked for would stay armed until the next
+            # tool call or config save.
+            sync_status_line_refresh()
         except Exception:
             pass
         return ""
@@ -3691,6 +4400,21 @@ def _render_pomodoro(pomo, theme, bar_width=8):
 
 
 def cmd_pomodoro(action, minutes=None):
+    """Run the focus-timer command, then re-evaluate the repaint timer.
+
+    Starting or stopping a timer flips whether a countdown is on screen, which
+    is one of the two things `refreshInterval` exists for.
+    """
+    try:
+        return _cmd_pomodoro_inner(action, minutes)
+    finally:
+        try:
+            sync_status_line_refresh()
+        except Exception:
+            pass
+
+
+def _cmd_pomodoro_inner(action, minutes=None):
     if action == "start":
         duration = POMODORO_DEFAULT_MINUTES
         if minutes is not None:
@@ -3899,11 +4623,16 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
     except Exception:
         pass  # if width detection/clamping fails, use configured bar size
 
-    parts = []  # list of (priority, text) tuples — sorted before joining
+    # list of ((priority, widget_id), text) tuples — sorted before joining.
+    # The key carries the widget id so the two-line splitter can tell which
+    # segment is which without every append site having to pass it along;
+    # tuple ordering still sorts by priority first, with the id as a stable
+    # tie-break.
+    parts = []
     _wpri = dict(WIDGET_PRIORITY)
     _wpri.update(config.get("widget_priority", {}))
     def _pri(widget_id):
-        return _wpri.get(widget_id, 999)
+        return (_wpri.get(widget_id, 999), widget_id)
 
     # Current Session (5-hour block)
     if show.get("session", True):
@@ -4007,52 +4736,38 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
             else:
                 parts.append((_w, f"Weekly {bar} {pct:.0f}%{pace_str}{weekly_reset_str}"))
 
-    # Opus weekly limit
-    if show.get("opus", True):
-        opus = usage.get("seven_day_opus")
-        if opus and opus.get("utilization") is not None:
-            pct = opus.get("utilization") or 0
-            bar = make_bar(pct, theme, plain=bar_plain, width=bw, bar_style=bstyle)
-            _o = _pri("opus")
-            if layout == "compact":
-                parts.append((_o, f"O {bar} {pct:.0f}%"))
-            elif layout == "minimal":
-                parts.append((_o, f"{bar} {pct:.0f}%"))
-            elif layout == "percent-first":
-                parts.append((_o, f"{pct:.0f}% {bar}"))
-            else:
-                parts.append((_o, f"Opus {bar} {pct:.0f}%"))
-
-    # Sonnet weekly limit
-    if show.get("sonnet", True):
-        sonnet = usage.get("seven_day_sonnet")
-        if sonnet and sonnet.get("utilization") is not None:
-            pct = sonnet.get("utilization") or 0
-            bar = make_bar(pct, theme, plain=bar_plain, width=bw, bar_style=bstyle)
-            pace_str = ""
-            if show.get("pace"):
-                pace = _calc_pace_pct(sonnet.get("resets_at"), 604800)
-                pace_str = _pace_indicator(pct, pace)
-            _sn = _pri("sonnet")
-            if layout == "compact":
-                parts.append((_sn, f"S {bar} {pct:.0f}%{pace_str}"))
-            elif layout == "minimal":
-                parts.append((_sn, f"{bar} {pct:.0f}%{pace_str}"))
-            elif layout == "percent-first":
-                parts.append((_sn, f"{pct:.0f}%{pace_str} {bar}"))
-            else:
-                parts.append((_sn, f"Sonnet {bar} {pct:.0f}%{pace_str}"))
+    # Per-model weekly caps (Opus / Sonnet / Fable).
+    #
+    # These are rendered only when the API actually reports a utilization for
+    # that model. Claude Pro returns null for the model-scoped windows, so on
+    # Pro these bars are simply absent — v3.1.0 drew a hardcoded "Sonnet ━ 0%"
+    # in that case, which looked like a real reading of an untouched budget
+    # rather than "no data" (issue #46).
+    for _widget_id, _usage_key, _label, _short in (
+        ("opus", "seven_day_opus", "Opus", "O"),
+        ("sonnet", "seven_day_sonnet", "Sonnet", "S"),
+        ("fable", "seven_day_fable", "Fable", "F"),
+    ):
+        if not show.get(_widget_id, True):
+            continue
+        _entry = usage.get(_usage_key)
+        if not _entry or _entry.get("utilization") is None:
+            continue
+        pct = _entry.get("utilization") or 0
+        bar = make_bar(pct, theme, plain=bar_plain, width=bw, bar_style=bstyle)
+        pace_str = ""
+        if show.get("pace"):
+            pace = _calc_pace_pct(_entry.get("resets_at"), 604800)
+            pace_str = _pace_indicator(pct, pace)
+        _p = _pri(_widget_id)
+        if layout == "compact":
+            parts.append((_p, f"{_short} {bar} {pct:.0f}%{pace_str}"))
+        elif layout == "minimal":
+            parts.append((_p, f"{bar} {pct:.0f}%{pace_str}"))
+        elif layout == "percent-first":
+            parts.append((_p, f"{pct:.0f}%{pace_str} {bar}"))
         else:
-            bar = make_bar(0, theme, plain=bar_plain, width=bw, bar_style=bstyle)
-            _sn = _pri("sonnet")
-            if layout == "compact":
-                parts.append((_sn, f"S {bar} 0%"))
-            elif layout == "minimal":
-                parts.append((_sn, f"{bar} 0%"))
-            elif layout == "percent-first":
-                parts.append((_sn, f"0% {bar}"))
-            else:
-                parts.append((_sn, f"Sonnet {bar} 0%"))
+            parts.append((_p, f"{_label} {bar} {pct:.0f}%{pace_str}"))
 
     # Extra usage (bonus/gifted credits)
     extra = usage.get("extra_usage")
@@ -4151,6 +4866,19 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
             pass
 
+    # Rolling 7-day API-equivalent cost (opt-in, off by default)
+    if show.get("weekly_cost", False):
+        try:
+            wdata = _get_cached_weekly_cost()
+            wtotal = wdata.get("total_cost_usd", 0.0)
+            if wtotal > 0:
+                currency = _sanitize(config.get("currency", "$"))[:5]
+                rate, code = _get_exchange_rate(currency)
+                sym = "$" if code == "USD" else currency
+                parts.append((_pri("weekly_cost"), f"{DIM}7d:{RESET} {sym}{wtotal * rate:,.2f}"))
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass
+
     # Lines changed (from stdin cost data)
     if stdin_ctx and show.get("lines", True):
         la = stdin_ctx.get("lines_added")
@@ -4160,17 +4888,6 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
             r = int(lr or 0)
             if a > 0 or r > 0:
                 parts.append((_pri("lines"), f"{BRIGHT_GREEN}+{a}{RESET} {BRIGHT_RED}-{r}{RESET}"))
-
-    # Peak hours indicator
-    is_peak, peak_str = _check_peak_hours(config, plan)
-    if peak_str:
-        _pk = _pri("peak")
-        if is_peak:
-            parts.append((_pk, f"{RED_MUTED}{peak_str}{RESET}"))
-        elif "in " in peak_str:
-            parts.append((_pk, f"{YELLOW}{peak_str}{RESET}"))
-        else:
-            parts.append((_pk, f"{GREEN}{peak_str}{RESET}"))
 
 
     # Streak display
@@ -4198,8 +4915,62 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
                   or os.environ.get("CLAUDE_CODE_EFFORT_LEVEL", ""))
         if effort and effort != "unset":
             effort = _sanitize(effort)
-            effort_short = {"medium": "med"}.get(effort, effort)
-            parts.append((_pri("effort"), effort_short))
+            effort_short = _format_effort(
+                effort, config.get("effort_format", DEFAULT_EFFORT_FORMAT)
+            )
+            colour = EFFORT_COLOURS.get(effort, "")
+            parts.append((_pri("effort"), f"{colour}{effort_short}{RESET}" if colour else effort_short))
+
+    # Fast mode — Opus running at up to 2.5x output speed, premium pricing.
+    # Worth flagging precisely because it costs more than standard Opus.
+    if stdin_ctx and show.get("fast_mode", True) and stdin_ctx.get("fast_mode"):
+        parts.append((_pri("fast_mode"), f"{BRIGHT_YELLOW}⚡fast{RESET}"))
+
+    # Thinking indicator (opt-in — on by default on current models, so it is
+    # only interesting to users who toggle it).
+    if stdin_ctx and show.get("thinking", False):
+        thinking = stdin_ctx.get("thinking")
+        if thinking is not None:
+            if thinking:
+                parts.append((_pri("thinking"), f"{DIM}think{RESET}"))
+            else:
+                parts.append((_pri("thinking"), f"{DIM}no-think{RESET}"))
+
+    # Active subagent
+    if stdin_ctx and show.get("agent", True):
+        agent_name = stdin_ctx.get("agent_name")
+        if agent_name:
+            parts.append((_pri("agent"), f"{MAGENTA}▸{agent_name}{RESET}"))
+
+    # Cache hit rate (opt-in) — share of billable input served from cache.
+    if stdin_ctx and show.get("cache", False):
+        hit = stdin_ctx.get("cache_hit_pct")
+        if hit is not None:
+            # High cache hit is good, so colour it inverted relative to the
+            # usage bars: green when most input is cached, red when little is.
+            if hit >= 70:
+                colour = GREEN
+            elif hit >= 40:
+                colour = YELLOW
+            else:
+                colour = RED
+            if layout == "minimal":
+                parts.append((_pri("cache"), f"{colour}{hit:.0f}%{RESET}"))
+            else:
+                parts.append((_pri("cache"), f"{DIM}cache{RESET} {colour}{hit:.0f}%{RESET}"))
+
+    # Pull request badge (opt-in), clickable via OSC 8 where supported.
+    if stdin_ctx and show.get("pr", False):
+        pr_number = stdin_ctx.get("pr_number")
+        if pr_number is not None:
+            state = stdin_ctx.get("pr_review_state", "")
+            colour = PR_STATE_COLOURS.get(state, CYAN)
+            # GitLab merge requests are conventionally written !N, not #N.
+            marker = "!" if stdin_ctx.get("pr_kind") == "mr" else "#"
+            label = f"{marker}{pr_number}"
+            if state:
+                label += f" {PR_STATE_GLYPHS.get(state, state)}"
+            parts.append((_pri("pr"), _osc8(stdin_ctx.get("pr_url"), f"{colour}{label}{RESET}")))
 
     # Worktree branch
     if stdin_ctx and show.get("worktree", True):
@@ -4221,7 +4992,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
     hook_state = _read_hook_state()
     hook_fresh = _is_hook_state_fresh(hook_state)
 
-    if show.get("heartbeat", True) and hook_fresh:
+    if show.get("heartbeat", False) and hook_fresh:
         tool_count = hook_state.get("tool_count", 0)
         session_start = hook_state.get("session_start", time.time())
         elapsed = time.time() - session_start
@@ -4229,7 +5000,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
         spinner = HEARTBEAT_SPINNER[frame_idx]
         parts.append((_pri("heartbeat"), f"[{spinner}] {tool_count} tools {_format_elapsed(elapsed)}"))
 
-    if show.get("activity", True) and hook_fresh:
+    if show.get("activity", False) and hook_fresh:
         if hook_state.get("rapid_calls", 0) > 3:
             parts.append((_pri("activity"), f"\u26a1 Active"))
 
@@ -4264,6 +5035,23 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
         except Exception:
             pass
 
+    if show.get("subagents", True):
+        try:
+            sub_str = _render_subagents(
+                config, (stdin_ctx or {}).get("session_id"))
+            if sub_str:
+                parts.append((_pri("subagents"), sub_str))
+        except Exception:
+            pass
+
+    if show.get("budget", True):
+        try:
+            budget_str = _render_budget(config, stdin_ctx)
+            if budget_str:
+                parts.append((_pri("budget"), budget_str))
+        except Exception:
+            pass
+
     if show.get("git_drift", False):
         try:
             drift_str = _render_git_drift()
@@ -4282,7 +5070,7 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
 
     # Sort widgets by priority, then join
     parts.sort(key=lambda x: x[0])
-    line = " | ".join(p[1] for p in parts)
+    line = _join_parts(parts, config)
 
     # Staleness indicator
     if show.get("staleness", True) and cache_age is not None:
@@ -4305,16 +5093,114 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, user=None, cache
     return line
 
 
+def _join_parts(parts, config):
+    """Join sorted widget segments into one or two rows.
+
+    Claude Code renders each line of stdout as its own status row, so a
+    deliberate two-row layout is just a newline. Two opt-in config keys drive
+    it, both lists of widget ids:
+
+    * ``line1_widgets`` — allowlist for row 1; everything else flows to row 2.
+    * ``line2_widgets`` — explicit push to row 2; everything else stays on row 1.
+
+    ``line1_widgets`` wins if both are set. With neither, everything stays on a
+    single row and the existing ``--wrap`` handling applies as before. A row
+    that ends up empty is dropped rather than emitted blank.
+    """
+    if not isinstance(config, dict):
+        return " | ".join(p[1] for p in parts)
+    line1_ids = config.get("line1_widgets") or []
+    line2_ids = config.get("line2_widgets") or []
+    # Only str ids are usable; a nested list/dict would make set() raise
+    # TypeError: unhashable type and blank the bar.
+    line1_ids = [w for w in line1_ids if isinstance(w, str)] if isinstance(line1_ids, list) else []
+    line2_ids = [w for w in line2_ids if isinstance(w, str)] if isinstance(line2_ids, list) else []
+    if not line1_ids and not line2_ids:
+        return " | ".join(p[1] for p in parts)
+
+    if line1_ids:
+        allow = set(line1_ids)
+        on_row1 = [p for p in parts if p[0][1] in allow]
+        on_row2 = [p for p in parts if p[0][1] not in allow]
+    else:
+        demote = set(line2_ids)
+        on_row1 = [p for p in parts if p[0][1] not in demote]
+        on_row2 = [p for p in parts if p[0][1] in demote]
+
+    rows = [" | ".join(p[1] for p in row) for row in (on_row1, on_row2)]
+    return "\n".join(r for r in rows if r)
+
+
+OSC8_START = "\033]8;;"
+OSC8_END = "\033]8;;\a"
+
+# Final bytes that terminate a CSI (colour) sequence.
+_CSI_TERMINATORS = "ABCDEFGHJKSTfmnsulh"
+
+
+def _skip_escape(text, i):
+    """Return the index just past the escape sequence starting at ``text[i]``.
+
+    Handles the two forms the status line emits:
+
+    * CSI colour codes — ``ESC [ ... <letter>``, short and self-terminating.
+    * OSC 8 hyperlinks — ``ESC ] 8 ; ; <url> BEL``. These matter because a URL
+      contains letters from the CSI terminator set (the ``h`` of ``https``), so
+      scanning for a CSI terminator would stop inside the URL and count the
+      rest of it as visible width.
+
+    ``i`` must point at an ESC. Callers use this for width maths, so an
+    unterminated sequence consumes the remainder rather than looping.
+    """
+    n = len(text)
+    if i + 1 < n and text[i + 1] == "]":
+        # OSC — runs until BEL or the ST terminator (ESC backslash).
+        j = i + 2
+        while j < n:
+            if text[j] == "\a":
+                return j + 1
+            if text[j] == "\033" and j + 1 < n and text[j + 1] == "\\":
+                return j + 2
+            j += 1
+        return n
+    if i + 1 < n and text[i + 1] == "[":
+        # CSI, per ECMA-48: parameter bytes 0x30-0x3F, then intermediate bytes
+        # 0x20-0x2F, then one final byte 0x40-0x7E. Matching the grammar rather
+        # than a hand-listed set of finals means a long true-colour SGR such as
+        # ESC[38;2;255;128;64;48;2;0;0;0m is consumed whole; the previous
+        # scanner gave up after 25 bytes and counted the tail as visible width.
+        j = i + 2
+        while j < n and 0x30 <= ord(text[j]) <= 0x3F:
+            j += 1
+        while j < n and 0x20 <= ord(text[j]) <= 0x2F:
+            j += 1
+        return j + 1 if j < n else n
+    # Bare ESC followed by a single final byte (e.g. ESC c), or a trailing ESC.
+    return min(i + 2, n)
+
+
+def _osc8(url, label):
+    """Wrap *label* in an OSC 8 hyperlink when *url* is usable.
+
+    Terminals without hyperlink support ignore the escape and show the label
+    unchanged, so this is safe to emit unconditionally. Returns the bare label
+    when there is no URL, or when it contains control characters that would
+    let it break out of the escape sequence.
+    """
+    if not url:
+        return label
+    if any(ch in url for ch in ("\a", "\033", "\n", "\r", ";")):
+        return label
+    return f"{OSC8_START}{url}\a{label}{OSC8_END}"
+
+
 def _visible_len(text):
     """Return the number of visible (non-ANSI-escape) characters in *text*."""
     count = 0
     i = 0
     while i < len(text):
         if text[i] == "\033":
-            j = i + 1
-            while j < len(text) and j < i + 25 and text[j] not in "ABCDEFGHJKSTfmnsulh":
-                j += 1
-            i = j + 1 if j < len(text) else j
+            i = _skip_escape(text, i)
             continue
         count += 1
         i += 1
@@ -4336,24 +5222,29 @@ def _truncate_line(line, config):
         visible_count = 0
         cut = None
         i = 0
+        in_link = False
+        cut_in_link = False
         while i < len(line):
             if line[i] == "\033":
-                # Skip ANSI escape sequence
-                j = i + 1
-                while j < len(line) and j < i + 25 and line[j] not in "ABCDEFGHJKSTfmnsulh":
-                    j += 1
-                i = j + 1 if j < len(line) else j
+                nxt = _skip_escape(line, i)
+                # Track hyperlink nesting so a cut inside one can be closed.
+                if line.startswith(OSC8_START, i):
+                    in_link = line[i:nxt] != OSC8_END
+                i = nxt
                 continue
             visible_count += 1
             if visible_count > max_visible:
                 cut = i
+                cut_in_link = in_link
                 break
             i += 1
         if cut is not None:
-            line = line[:cut] + RESET
+            # Close a hyperlink we cut through, or the terminal treats every
+            # following line as part of the link target.
+            line = line[:cut] + (OSC8_END if cut_in_link else "") + RESET
     except Exception:
         pass
-    return line + "\n"
+    return line
 
 
 def _wrap_line(line, config):
@@ -4405,66 +5296,453 @@ def _wrap_line(line, config):
 
 
 def _fit_line(line, config):
-    """Apply wrap or truncate depending on the user's --wrap setting."""
+    """Apply wrap or truncate depending on the user's --wrap setting.
+
+    The line may already be two rows when ``line1_widgets`` / ``line2_widgets``
+    are configured. Each row is fitted independently — measuring the joined
+    string would count the newline as a visible column and truncate the rows
+    against a shared budget they don't actually share.
+    """
+    if "\n" in line:
+        return "\n".join(_fit_line(row, config) for row in line.split("\n"))
     if config.get("wrap") == "auto":
         return _wrap_line(line, config)
     return _truncate_line(line, config)
 
 
-def _wrap_line(line, config):
-    """Wrap at ' | ' separators when the line would overflow the terminal.
+# ---------------------------------------------------------------------------
+# Subagent tracking
+# ---------------------------------------------------------------------------
+# Claude Code v2.1.198+ runs subagents in the background by default and lets
+# them nest (depth 3 by default), so a session can quietly accumulate a lot of
+# them. SubagentStart / SubagentStop carry `agent_id` and `agent_type`, which is
+# everything needed to keep a live count without polling anything.
+#
+# State is one directory per session holding one marker file per agent:
+# ``subagents/<session_id>/<agent_id>.live``, renamed to ``.done`` on stop.
+# Every write is an atomic create or rename of a distinct path. The obvious
+# single-JSON design failed two ways in practice: concurrent Start hooks lost
+# increments to the read-modify-write race (a parallel fan-out of ten agents
+# recorded two), and with several Claude Code windows open — or a session id
+# rotation after compaction — whichever session wrote last clobbered the
+# counters that every other session then displayed.
 
-    Returns one or two lines joined by newline.  If the line fits, it is
-    returned unchanged (no trailing newline added).  When wrapping is needed,
-    segments are distributed across two lines so that each stays within the
-    effective terminal width.
+SUBAGENT_STATE_TTL = 6 * 3600  # forget stragglers whose Stop hook never fired
+
+
+def _subagent_root():
+    return get_state_dir() / "subagents"
+
+
+def _safe_path_id(text, limit=64):
+    """Reduce an untrusted hook field to a filesystem-safe path component."""
+    return re.sub(r"[^A-Za-z0-9._-]", "", str(text or ""))[:limit].strip(".")
+
+
+def hook_subagent(event):
+    """Handle --hook-subagent-start / --hook-subagent-stop. Writes no stdout.
+
+    Hooks must stay silent: anything on stdout for these events lands in the
+    transcript as context. Errors are swallowed for the same reason — a
+    bookkeeping failure must never surface as a hook error to the user.
+    """
+    raw = ""
+    try:
+        if not sys.stdin.isatty():
+            raw = sys.stdin.read(65536)
+    except (OSError, ValueError):
+        pass
+    data = {}
+    try:
+        if raw.strip():
+            data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    try:
+        _record_subagent_event(event, data)
+    except Exception:
+        pass
+
+
+def _record_subagent_event(event, data):
+    """Record one Start/Stop event as a marker file. Concurrency-safe.
+
+    Ordering is not guaranteed between the two hook processes of a fast agent:
+    its Stop can land before its Start. A ``.done`` marker therefore blocks a
+    late ``.live`` from being created, and a Start that loses the race anyway
+    heals itself by demoting its own marker.
+    """
+    agent_id = _safe_path_id(data.get("agent_id"))
+    session_id = _safe_path_id(data.get("session_id"))
+    if not session_id:
+        return
+    if event == "start" and not agent_id:
+        # The spawn still counts toward the cap; give it a unique name.
+        agent_id = "noid-%d-%d" % (os.getpid(), time.monotonic_ns())
+    elif event == "stop" and not agent_id:
+        return
+
+    session_dir = _subagent_root() / session_id
+    live = session_dir / (agent_id + ".live")
+    done = session_dir / (agent_id + ".done")
+    # A pruner in another process can sweep this dir between the mkdir and
+    # the marker write (TOCTOU on the staleness check); the second attempt
+    # restores the event rather than silently losing it.
+    for _attempt in (0, 1):
+        _secure_mkdir(session_dir)
+        if event == "start":
+            if not done.exists():
+                try:
+                    with open(live, "x", encoding="utf-8") as f:
+                        json.dump({"type": _sanitize(str(data.get("agent_type") or ""))[:40],
+                                   "started": time.time()}, f)
+                except (FileExistsError, OSError):
+                    pass
+                # Stop may have slipped in between the check and the create.
+                if done.exists():
+                    try:
+                        os.replace(live, done)
+                    except OSError:
+                        pass
+        elif event == "stop":
+            try:
+                os.replace(live, done)
+                # os.replace preserves mtime: an agent that ran past the TTL
+                # would otherwise leave a marker that looks ancient, and the
+                # next prune would erase the session's whole history.
+                os.utime(done, None)
+            except OSError:
+                # Stop arrived before Start (or Start never made it): leave a
+                # tombstone so the late Start can't mark the agent live.
+                try:
+                    with open(done, "w", encoding="utf-8") as f:
+                        json.dump({"stopped": time.time()}, f)
+                except OSError:
+                    pass
+        if live.exists() or done.exists():
+            break
+
+    _prune_subagent_dirs(_subagent_root())
+    # One-time migration: the pre-3.2.1 single-file state is dead weight now.
+    try:
+        os.unlink(get_state_dir() / "subagents.json")
+    except OSError:
+        pass
+
+
+def _prune_subagent_dirs(root, now=None):
+    """Remove session dirs with no marker newer than the TTL.
+
+    Sessions end without a goodbye event, so their dirs would otherwise
+    accumulate forever. Anything recent enough to still be rendered is kept.
+    """
+    now = now or time.time()
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            # The newest marker decides; the dir's own mtime only matters for
+            # an empty dir (a concurrent hook mid-mkdir must not be swept).
+            newest = max((c.stat().st_mtime for c in os.scandir(entry.path)),
+                         default=entry.stat().st_mtime)
+            if now - newest > SUBAGENT_STATE_TTL:
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _count_subagents(session_id, now=None):
+    """Return (live, spawned) for one session from its marker files."""
+    session_id = _safe_path_id(session_id)
+    if not session_id:
+        return 0, 0
+    now = now or time.time()
+    try:
+        entries = list(os.scandir(_subagent_root() / session_id))
+    except OSError:
+        return 0, 0
+    # An agent can transiently own both markers (Stop's rename fails against
+    # Start's open handle, then tombstones after Start's heal check). The
+    # .done twin wins: one spawn, not live.
+    done_ids = {e.name[:-5] for e in entries if e.name.endswith(".done")}
+    live = 0
+    live_ids = set()
+    for entry in entries:
+        if not entry.name.endswith(".live"):
+            continue
+        agent = entry.name[:-5]
+        live_ids.add(agent)
+        if agent in done_ids:
+            continue
+        try:
+            # A marker past the TTL is a crashed agent whose Stop never
+            # fired, not a live one.
+            if now - entry.stat().st_mtime < SUBAGENT_STATE_TTL:
+                live += 1
+        except OSError:
+            pass
+    return live, len(live_ids | done_ids)
+
+
+def _render_subagents(config, session_id=None):
+    """Return the subagent segment, or None when there is nothing to say.
+
+    Counts are scoped to *session_id* — the session this repaint belongs to —
+    so one window never displays another window's agents. Claude Code enforces
+    its own caps (spawns and concurrency) but does not expose them on stdin or
+    in settings, so the denominators come from ``limits`` in claude-pulse's
+    own config and default to Claude Code's documented values.
+    """
+    if not session_id:
+        return None
+    live, spawned = _count_subagents(session_id)
+    if not live and not spawned:
+        return None
+
+    limits = config.get("limits", {})
+    if not isinstance(limits, dict):
+        limits = {}
+    spawn_cap = limits.get("subagent_spawns", DEFAULT_LIMITS["subagent_spawns"])
+    conc_cap = limits.get("subagent_concurrent", DEFAULT_LIMITS["subagent_concurrent"])
+
+    def _tint(value, cap):
+        """Green under half, yellow past half, red past 80% of the cap."""
+        if not isinstance(cap, int) or cap <= 0:
+            return ""
+        ratio = value / cap
+        if ratio >= 0.8:
+            return RED
+        if ratio >= 0.5:
+            return YELLOW
+        return GREEN
+
+    layout = config.get("layout", DEFAULT_LAYOUT)
+    live_part = f"{_tint(live, conc_cap)}{live}{RESET}"
+    if isinstance(spawn_cap, int) and spawn_cap > 0:
+        total_part = f"{_tint(spawned, spawn_cap)}{spawned}{RESET}{DIM}/{spawn_cap}{RESET}"
+    else:
+        total_part = f"{spawned}"
+    if layout == "minimal":
+        return f"⚇{live_part}"
+    if layout == "compact":
+        return f"⚇{live_part} {total_part}"
+    return f"{DIM}agents{RESET} {live_part} live {DIM}·{RESET} {total_part}"
+
+
+def _render_budget(config, stdin_ctx):
+    """Return a spend-against-budget segment, or None.
+
+    ``--max-budget-usd`` is a Claude Code CLI flag with no settings key and no
+    environment variable, so its value cannot be discovered from here. The
+    ceiling is therefore claude-pulse's own ``budget_usd`` setting, which the
+    user sets to match whatever they pass on the command line.
     """
     try:
-        term_width = _detect_terminal_width() or shutil.get_terminal_size((120, 24)).columns
-        max_width_pct = config.get("max_width", DEFAULT_MAX_WIDTH_PCT)
-        if not (isinstance(max_width_pct, int) and 20 <= max_width_pct <= 100):
-            max_width_pct = DEFAULT_MAX_WIDTH_PCT
-        max_visible = (term_width * max_width_pct) // 100
+        budget = float(config.get("budget_usd") or 0)
+    except (TypeError, ValueError):
+        return None
+    if budget <= 0:
+        return None
+    spent = (stdin_ctx or {}).get("cost_usd")
+    if spent is None:
+        return None
+    try:
+        spent = float(spent)
+    except (TypeError, ValueError):
+        return None
 
-        if _visible_len(line) <= max_visible:
-            return line
+    pct = min(100.0, (spent / budget) * 100.0) if budget else 0.0
+    theme = get_theme_colours(config.get("theme", "default"))
+    bw = BAR_SIZES.get(config.get("bar_size", DEFAULT_BAR_SIZE), BAR_SIZES[DEFAULT_BAR_SIZE])
+    bar = make_bar(pct, theme, width=max(2, bw // 2),
+                   bar_style=config.get("bar_style", DEFAULT_BAR_STYLE))
+    currency = _sanitize(config.get("currency", "$"))[:5]
+    rate, code = _get_exchange_rate(currency)
+    sym = "$" if code == "USD" else currency
+    layout = config.get("layout", DEFAULT_LAYOUT)
+    if layout == "minimal":
+        return f"{bar} {pct:.0f}%"
+    return f"{DIM}budget{RESET} {bar} {sym}{spent * rate:,.2f}{DIM}/{sym}{budget * rate:,.2f}{RESET}"
 
-        # Split on the rendered separator
-        segments = line.split(" | ")
-        if len(segments) < 2:
-            return _truncate_line(line, config)
 
-        # Greedily fill line 1, then put the rest on line 2
-        line1_parts = [segments[0]]
-        rest = segments[1:]
-        for seg in rest:
-            candidate = " | ".join(line1_parts + [seg])
-            if _visible_len(candidate) <= max_visible:
-                line1_parts.append(seg)
-            else:
-                break
-        used = len(line1_parts)
-        line2_parts = segments[used:]
+# ---------------------------------------------------------------------------
+# Subagent status line (the `subagentStatusLine` setting)
+# ---------------------------------------------------------------------------
 
-        if not line2_parts:
-            return _truncate_line(line, config)
+SUBAGENT_STATUS_GLYPHS = {
+    "running": "▸",    # ▸
+    "active": "▸",
+    "pending": "·",    # ·
+    "queued": "·",
+    "done": "✓",       # ✓
+    "completed": "✓",
+    "success": "✓",
+    "failed": "✗",     # ✗
+    "error": "✗",
+    "cancelled": "✗",
+}
+SUBAGENT_STATUS_COLOURS = {
+    "running": CYAN, "active": CYAN,
+    "pending": DIM, "queued": DIM,
+    "done": GREEN, "completed": GREEN, "success": GREEN,
+    "failed": RED, "error": RED, "cancelled": YELLOW,
+}
 
-        row1 = " | ".join(line1_parts)
-        row2 = " | ".join(line2_parts)
-        # Truncate each row individually as a safety net
-        row1 = _truncate_line(row1, config)
-        row2 = _truncate_line(row2, config)
-        return row1 + RESET + "\n" + row2
+
+def _elapsed_from_start(start_time):
+    """Seconds since *start_time*, which may be epoch ms, epoch s, or ISO."""
+    if start_time is None:
+        return None
+    try:
+        value = float(start_time)
+        # Anything past ~2001 in milliseconds is far beyond a plausible epoch
+        # second, so treat large values as ms.
+        if value > 1e11:
+            value /= 1000.0
+        delta = time.time() - value
+        return delta if delta >= 0 else None
+    except (TypeError, ValueError):
+        pass
+    ts = _parse_transcript_ts(start_time)
+    if ts is None:
+        return None
+    delta = time.time() - ts
+    return delta if delta >= 0 else None
+
+
+def _render_subagent_row(task, config, columns=None):
+    """Build one subagent row body, or "" to hide it.
+
+    Mirrors the main bar's vocabulary — same theme, same bar style — so the
+    agent panel reads as part of the same tool rather than a separate widget.
+    """
+    if not isinstance(task, dict):
+        return ""
+    name = _sanitize(str(task.get("name") or task.get("type") or "agent"))[:28]
+    status = _sanitize(str(task.get("status") or "")).lower()
+    glyph = SUBAGENT_STATUS_GLYPHS.get(status, "·")
+    colour = SUBAGENT_STATUS_COLOURS.get(status, "")
+
+    parts = [f"{colour}{glyph}{RESET} {name}" if colour else f"{glyph} {name}"]
+
+    model_short = _model_short_name(str(task.get("model") or ""))
+    if model_short:
+        parts.append(f"{DIM}{model_short}{RESET}")
+
+    effort = task.get("effort")
+    if effort not in (None, "", "unset"):
+        # Either a level string or a numeric token budget.
+        if isinstance(effort, (int, float)) and not isinstance(effort, bool):
+            parts.append(f"{DIM}{_fmt_tokens(int(effort))}{RESET}")
+        else:
+            rendered = _format_effort(
+                _sanitize(str(effort)).lower(),
+                config.get("effort_format", DEFAULT_EFFORT_FORMAT),
+            )
+            if rendered:
+                parts.append(f"{DIM}{rendered}{RESET}")
+
+    # Context bar, when Claude Code resolved the model's window (v2.1.205+).
+    try:
+        tokens = int(task.get("tokenCount") or 0)
+        window = int(task.get("contextWindowSize") or 0)
+    except (TypeError, ValueError):
+        tokens, window = 0, 0
+    if tokens and window > 0:
+        pct = max(0.0, min(100.0, (tokens / window) * 100.0))
+        theme = get_theme_colours(config.get("theme", "default"))
+        bw = BAR_SIZES.get(config.get("bar_size", DEFAULT_BAR_SIZE), BAR_SIZES[DEFAULT_BAR_SIZE])
+        bar = make_bar(pct, theme, width=max(2, bw // 2),
+                       bar_style=config.get("bar_style", DEFAULT_BAR_STYLE))
+        parts.append(f"{bar} {pct:.0f}%")
+    elif tokens:
+        parts.append(f"{DIM}{_fmt_tokens(tokens)}{RESET}")
+
+    elapsed = _elapsed_from_start(task.get("startTime"))
+    if elapsed is not None:
+        parts.append(f"{DIM}{_format_elapsed(elapsed)}{RESET}")
+
+    row = f" {DIM}·{RESET} ".join(parts)
+
+    # `columns` is the usable row width Claude Code offers; respect it.
+    try:
+        width = int(columns or 0)
+    except (TypeError, ValueError):
+        width = 0
+    if width > 0 and _visible_len(row) > width:
+        row = _clip_visible(row, width)
+    return row
+
+
+def _clip_visible(text, width):
+    """Clip to *width* visible columns, keeping escapes intact and resetting."""
+    count = 0
+    i = 0
+    while i < len(text):
+        if text[i] == "":
+            i = _skip_escape(text, i)
+            continue
+        count += 1
+        if count > width:
+            return text[:i] + RESET
+        i += 1
+    return text
+
+
+def cmd_subagent_status_line():
+    """Handle --subagent-status-line: render the agent panel's rows.
+
+    Claude Code sends every visible subagent row as one JSON object on stdin
+    and expects one JSON line of ``{"id", "content"}`` per row we want to
+    override. Rows we say nothing about keep their default rendering, so any
+    failure here degrades to Claude Code's own display rather than a blank
+    panel — which is why the whole body is defensive.
+    """
+    try:
+        raw = sys.stdin.read(1_000_000) if not sys.stdin.isatty() else ""
+    except (OSError, ValueError):
+        return
+    if not raw or not raw.strip():
+        return
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not isinstance(data, dict):
+        return
+
+    tasks = data.get("tasks")
+    if not isinstance(tasks, list):
+        return
+    columns = data.get("columns")
+
+    try:
+        config = load_config()
     except Exception:
-        return _truncate_line(line, config)
+        config = {}
 
-
-def _fit_line(line, config):
-    """Apply wrap or truncate depending on the user's --wrap setting."""
-    if config.get("wrap") == "auto":
-        return _wrap_line(line, config)
-    return _truncate_line(line, config)
-
+    out = []
+    for task in tasks[:64]:  # a sane ceiling; the panel never shows more
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("id")
+        if not task_id:
+            continue
+        try:
+            content = _render_subagent_row(task, config, columns)
+        except Exception:
+            continue  # leave this row's default rendering alone
+        if not content:
+            continue
+        out.append(json.dumps({"id": str(task_id), "content": content}))
+    if out:
+        sys.stdout.buffer.write(("\n".join(out) + "\n").encode("utf-8"))
 
 # ---------------------------------------------------------------------------
 # Install
@@ -4500,8 +5778,102 @@ def _get_python_cmd():
     return exe
 
 
+# Refresh cadences (seconds) for `statusLine.refreshInterval`, chosen by what
+# is actually on screen. Claude Code enforces a minimum of 1.
+REFRESH_ANIMATED = 2      # animations repaint every tick
+REFRESH_TIMED = 15        # focus countdown / heartbeat elapsed time
+REFRESH_STATIC = None     # nothing time-based — stay purely event-driven
+
+
+def _desired_refresh_interval(config):
+    """Return the `refreshInterval` this config needs, or None for event-driven.
+
+    Claude Code redraws the status line on its own events (prompt submit, tool
+    use, and so on), which is enough for anything derived from stdin. It is not
+    enough for content that changes with the wall clock: animation frames, the
+    focus-timer countdown, and the heartbeat's elapsed time all freeze while
+    the session sits idle. `refreshInterval` re-runs the command on a timer to
+    cover exactly those cases.
+
+    We only ask for a timer when something needs it, so a static bar costs
+    nothing extra.
+    """
+    if not isinstance(config, dict):
+        return REFRESH_STATIC
+    if config.get("animate", "off") != "off":
+        return REFRESH_ANIMATED
+    show = config.get("show", {})
+    if not isinstance(show, dict):
+        show = {}
+    # `heartbeat` and `pomodoro` are enabled by default but render nothing
+    # unless a hook is currently firing or a focus timer is actually running.
+    # Asking for a timer on the strength of the *setting* alone meant a stock
+    # config relaunched Python every 15s — 240 times an hour — to redraw a bar
+    # that never changed. Only ask once one of them is genuinely on screen.
+    try:
+        if show.get("heartbeat", False) and _is_hook_state_fresh(_read_hook_state()):
+            return REFRESH_TIMED
+    except Exception:
+        pass
+    try:
+        if show.get("pomodoro", True):
+            pomo = _read_pomodoro()
+            if pomo and pomo.get("active"):
+                return REFRESH_TIMED
+    except Exception:
+        pass
+    return REFRESH_STATIC
+
+
+def sync_status_line_refresh(config=None):
+    """Re-point `statusLine.refreshInterval` at what the current config needs.
+
+    Called after any setting that changes the answer (animation mode, focus
+    timer, widget visibility). Rewrites only that one key, leaving the rest of
+    settings.json untouched, and is a no-op when claude-pulse is not the
+    installed status line — we must never edit another tool's block.
+
+    Returns the interval that was written (None when the key was removed), or
+    False when nothing was done.
+    """
+    settings_path = _claude_config_dir() / "settings.json"
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(settings, dict):
+        return False  # valid JSON, wrong shape — leave it alone
+    status_line = settings.get("statusLine")
+    if not isinstance(status_line, dict):
+        return False
+    # Only touch our own status line.
+    if "claude_status.py" not in str(status_line.get("command", "")):
+        return False
+
+    if config is None:
+        config = load_config()
+    interval = _desired_refresh_interval(config)
+
+    current = status_line.get("refreshInterval")
+    had_legacy = "refresh" in status_line
+    if current == interval and not had_legacy:
+        return interval  # already correct
+
+    status_line.pop("refresh", None)  # never a real Claude Code setting
+    if interval is None:
+        status_line.pop("refreshInterval", None)
+    else:
+        status_line["refreshInterval"] = interval
+    try:
+        _atomic_json_write(settings_path, settings)
+    except OSError:
+        return False
+    return interval
+
+
 def install_status_line():
-    settings_path = Path.home() / ".claude" / "settings.json"
+    settings_path = _claude_config_dir() / "settings.json"
     script_path = _win_portable_path(Path(__file__).resolve())
     python_cmd = _get_python_cmd()
 
@@ -4518,9 +5890,23 @@ def install_status_line():
             return
 
     # Status line command — use $HOME on Windows for Claude Code compat
-    settings["statusLine"] = {
+    status_line = {
         "type": "command",
         "command": f'{python_cmd} "{script_path}"',
+    }
+    # Versions up to v3.1.0 wrote `"refresh": 150` here. Claude Code has no
+    # such setting, so it was silently ignored and the timed repaint never
+    # happened. The real key is `refreshInterval`, in seconds.
+    interval = _desired_refresh_interval(load_config())
+    if interval is not None:
+        status_line["refreshInterval"] = interval
+    settings["statusLine"] = status_line
+
+    # Render the agent-panel rows too. Claude Code falls back to its own row
+    # rendering for anything we don't emit, so this can only add information.
+    settings["subagentStatusLine"] = {
+        "type": "command",
+        "command": f'{python_cmd} "{script_path}" --subagent-status-line',
     }
 
     # No hooks installed here — static status bar by default.
@@ -4531,7 +5917,12 @@ def install_status_line():
     _atomic_json_write(settings_path, settings)
 
     utf8_print(f"Installed status line to {settings_path}")
+    utf8_print("Installed subagent status line (per-agent rows in the agent panel)")
     utf8_print(f"Command: {python_cmd} \"{script_path}\"")
+    if interval is not None:
+        utf8_print(f"Refresh: every {interval}s (plus Claude Code's own events)")
+    else:
+        utf8_print("Refresh: event-driven (no timer needed for a static bar)")
     utf8_print("Restart Claude Code to see the status line.")
     utf8_print("Tip: use --animate on for always-on rainbow animation.")
 
@@ -4550,7 +5941,7 @@ def install_pulse_command():
         utf8_print("      Re-run the full installer (install.sh / install.ps1) to add it.")
         return
 
-    commands_dir = Path.home() / ".claude" / "commands"
+    commands_dir = _claude_config_dir() / "commands"
     dest = commands_dir / "pulse.md"
     try:
         _secure_mkdir(commands_dir)
@@ -5010,7 +6401,7 @@ def cmd_print_config():
     # Extra credits status — check the API
     utf8_print(f"\n  {BOLD}Extra Credits:{RESET}")
     try:
-        token, _, _ = get_credentials()
+        token, _ = get_credentials()
         if token:
             _usage = fetch_usage(token)
             _extra = _usage.get("extra_usage")
@@ -5580,44 +6971,86 @@ def main():
             utf8_print("Usage: --animation-speed <slow|normal|fast>")
         return
 
-    if "--peak-hours" in args:
-        idx = args.index("--peak-hours")
+    if "--subagent-status-line" in args:
+        cmd_subagent_status_line()
+        return
+
+    if "--hook-subagent-start" in args:
+        hook_subagent("start")
+        return
+
+    if "--hook-subagent-stop" in args:
+        hook_subagent("stop")
+        return
+
+    if "--budget" in args:
+        idx = args.index("--budget")
+        config = load_config()
+        if idx + 1 < len(args):
+            raw = args[idx + 1]
+            try:
+                value = 0.0 if raw.lower() in ("off", "none", "0") else float(raw.lstrip("$£€"))
+            except ValueError:
+                utf8_print("Usage: --budget <amount|off>   e.g. --budget 25  (matches --max-budget-usd)")
+                return
+            config["budget_usd"] = value
+            save_config(config)
+            if value > 0:
+                utf8_print(f"Budget: {BOLD}${value:,.2f}{RESET}  (set this to match your --max-budget-usd)")
+            else:
+                utf8_print(f"Budget: {RED}off{RESET}")
+        else:
+            cur = config.get("budget_usd", 0)
+            state = f"${cur:,.2f}" if cur else f"{RED}off{RESET}"
+            utf8_print(f"Budget: {BOLD}{state}{RESET}")
+        return
+
+    if "--limits" in args:
+        idx = args.index("--limits")
+        config = load_config()
+        limits = config.get("limits", dict(DEFAULT_LIMITS))
+        if idx + 1 < len(args) and "=" in args[idx + 1]:
+            for pair in args[idx + 1].split(","):
+                if "=" not in pair:
+                    continue
+                key, _, val = pair.partition("=")
+                key = key.strip()
+                if key not in DEFAULT_LIMITS:
+                    utf8_print(f"Unknown limit '{key}'. Known: {', '.join(DEFAULT_LIMITS)}")
+                    return
+                try:
+                    limits[key] = max(0, int(val))
+                except ValueError:
+                    utf8_print(f"Limit '{key}' must be a whole number (0 hides the denominator).")
+                    return
+            config["limits"] = limits
+            save_config(config)
+        utf8_print(f"{BOLD}Caps{RESET} {DIM}(Claude Code enforces these; it does not report them,{RESET}")
+        utf8_print(f"{DIM}     so set them here to match your setup){RESET}")
+        for key, default in DEFAULT_LIMITS.items():
+            cur = limits.get(key, default)
+            mark = "" if cur == default else f"  {DIM}(default {default}){RESET}"
+            utf8_print(f"  {key:<22} {BOLD}{cur or 'hidden'}{RESET}{mark}")
+        return
+
+    if "--effort-format" in args:
+        idx = args.index("--effort-format")
         if idx + 1 < len(args):
             val = args[idx + 1].lower()
-            config = load_config()
-            if val in ("off", "false", "no", "0"):
-                config["peak_hours"]["enabled"] = False
+            if val in EFFORT_FORMATS:
+                config = load_config()
+                config["effort_format"] = val
                 save_config(config)
-                utf8_print(f"Peak hours: {RED}off{RESET}")
-            elif val in ("on", "true", "yes", "1"):
-                config["peak_hours"]["enabled"] = True
-                save_config(config)
-                start = config["peak_hours"]["start"]
-                end = config["peak_hours"]["end"]
-                utf8_print(f"Peak hours: {GREEN}on{RESET}  ({start} - {end} local time)")
-            elif ":" in val or "-" in val:
-                # Parse "13:00-19:00" or "13:00" as start with optional end
-                parts_str = val.replace(" ", "").split("-")
-                start = parts_str[0]
-                end = parts_str[1] if len(parts_str) > 1 else args[idx + 2] if idx + 2 < len(args) else None
-                if not end:
-                    utf8_print("Usage: --peak-hours 13:00-19:00")
-                    return
-                config["peak_hours"]["enabled"] = True
-                config["peak_hours"]["start"] = start
-                config["peak_hours"]["end"] = end
-                save_config(config)
-                utf8_print(f"Peak hours: {GREEN}{start} - {end}{RESET} (local time)")
+                sample = _format_effort("medium", val)
+                utf8_print(f"Effort format: {BOLD}{val}{RESET}  (renders as: {sample})")
             else:
-                utf8_print("Usage: --peak-hours on|off|HH:MM-HH:MM")
-                utf8_print(f"  on              Enable peak indicator")
-                utf8_print(f"  off             Disable peak indicator")
-                utf8_print(f"  13:00-19:00     Set custom peak window (local time)")
+                utf8_print(f"Usage: --effort-format <{'|'.join(EFFORT_FORMATS)}>")
+                for fmt in EFFORT_FORMATS:
+                    utf8_print(f"  {fmt:<10} {_format_effort('medium', fmt)}")
         else:
             config = load_config()
-            peak = config.get("peak_hours", {})
-            state = f"{GREEN}on{RESET}" if peak.get("enabled") else f"{RED}off{RESET}"
-            utf8_print(f"Peak hours: {state}  ({peak.get('start', '13:00')} - {peak.get('end', '19:00')} local time)")
+            current = config.get("effort_format", DEFAULT_EFFORT_FORMAT)
+            utf8_print(f"Effort format: {BOLD}{current}{RESET}  (renders as: {_format_effort('medium', current)})")
         return
 
     if "--config" in args:
@@ -5651,6 +7084,17 @@ def main():
     config = load_config()
     cache_ttl = config.get("cache_ttl_seconds", DEFAULT_CACHE_TTL)
 
+    # Self-heal the repaint timer. Transitions that no command observes —
+    # the heartbeat ageing past its freshness TTL is the main one — would
+    # otherwise leave a stale 15s `refreshInterval` armed indefinitely.
+    # Each repaint (including the timed ones that stale timer causes) checks
+    # whether the timer is still wanted; a no-op costs one settings.json
+    # read and never blocks on anything but local disk.
+    try:
+        sync_status_line_refresh(config)
+    except Exception:
+        pass
+
     # Note: _detect_status_bar_conflict() removed — it suppressed all output
     # when leftover npm @anthropic-ai/claude-code files existed on disk,
     # even after migrating to the native installer.
@@ -5672,7 +7116,18 @@ def main():
     # survives across refreshes that don't receive stdin data from Claude Code.
     # Merge new data into persisted data so partial updates (e.g. model but
     # no context_pct during thinking) don't wipe previously known fields.
-    _STDIN_CTX_KEYS = {"model_name", "context_pct", "context_used", "context_limit", "cost_usd", "worktree_branch", "_rate_limits", "lines_added", "lines_removed"}
+    # Fields worth carrying across a refresh that arrives without stdin.
+    # Deliberately excludes `agent_name`: a subagent name is only true for the
+    # turn it ran on, so persisting it would leave a stale "▸reviewer" pinned
+    # to the bar long after that subagent finished.
+    _STDIN_CTX_KEYS = {
+        "model_name", "context_pct", "context_used", "context_limit",
+        "cost_usd", "worktree_branch", "_rate_limits",
+        "lines_added", "lines_removed",
+        "effort", "fast_mode", "thinking", "cc_version",
+        "cache_hit_pct", "cache_read_tokens",
+        "pr_number", "pr_url", "pr_review_state", "pr_kind",
+    }
     stdin_ctx_path = get_state_dir() / "stdin_ctx.json"
     persisted = {}
     try:
@@ -5701,56 +7156,61 @@ def main():
     # The API is only needed for extra credits and per-model caps (opus/sonnet).
     stdin_rl = stdin_ctx.get("_rate_limits")
     if stdin_rl:
-        # Build a synthetic usage dict from stdin rate limits
-        usage_from_stdin = {}
-        if "five_hour" in stdin_rl:
-            usage_from_stdin["five_hour"] = stdin_rl["five_hour"]
-        if "seven_day" in stdin_rl:
-            usage_from_stdin["seven_day"] = stdin_rl["seven_day"]
+        # Build a synthetic usage dict from stdin rate limits. Take *every*
+        # window stdin offers, including the model-scoped weekly caps
+        # (seven_day_opus / _sonnet / _fable). Previously only five_hour and
+        # seven_day were copied and the per-model caps were re-fetched over
+        # OAuth — which both dropped Fable entirely and made a network call for
+        # data Claude Code had already handed us.
+        usage_from_stdin = {k: v for k, v in stdin_rl.items() if v}
+        has_model_caps = any(k.startswith("seven_day_") for k in usage_from_stdin)
 
-        # Merge with cached API data for extra/opus/sonnet if available
-        has_model_caps = False
+        # extra_usage (bonus credits) is never on stdin, so it still comes from
+        # cache, and from the API only if we have nothing cached at all.
+        plan_from_cache = ""
         user_from_cache = None
         if cached and "usage" in cached:
-            for key in ("extra_usage", "seven_day_opus", "seven_day_sonnet"):
-                if key in cached["usage"]:
-                    usage_from_stdin[key] = cached["usage"][key]
-                    has_model_caps = True
             plan_from_cache = cached.get("plan", "")
+            for key, value in cached["usage"].items():
+                if key not in usage_from_stdin:
+                    usage_from_stdin[key] = value
+                    if key.startswith("seven_day_"):
+                        has_model_caps = True
+                if key == "extra_usage":
+                    has_model_caps = has_model_caps or True
             user_from_cache = cached.get("user")
-        else:
-            plan_from_cache = ""
 
-        # If no per-model data cached, fetch from API once to populate it
-        if not has_model_caps:
+        # Only reach for the API when stdin left us with nothing to draw.
+        # Previously any payload without model-scoped caps triggered a blocking
+        # OAuth request — which is every Claude Pro session, on every repaint
+        # with a cold cache, for data that only enriches an already-complete
+        # bar. extra_usage and per-model caps are both nice-to-have; the
+        # five-hour and weekly windows are the status line.
+        has_core = "five_hour" in usage_from_stdin or "seven_day" in usage_from_stdin
+        if not has_core and not has_model_caps and "extra_usage" not in usage_from_stdin:
             try:
-                token, api_plan, _api_user = get_credentials()
+                token, api_plan = get_credentials()
                 if token:
                     api_usage = fetch_usage(token)
-                    for key in ("extra_usage", "seven_day_opus", "seven_day_sonnet"):
-                        if key in api_usage:
-                            usage_from_stdin[key] = api_usage[key]
+                    for key, value in api_usage.items():
+                        if key in _USAGE_CACHE_KEYS and key not in usage_from_stdin:
+                            usage_from_stdin[key] = value
                     if api_plan:
                         plan_from_cache = api_plan
                     write_cache(cache_path, "", usage=api_usage, plan=plan_from_cache)
             except Exception:
                 pass
 
-        # Get plan from credentials (lightweight, no API call)
-        if not plan_from_cache:
-            _, plan_from_cache, cred_user = get_credentials()
-            plan_from_cache = plan_from_cache or ""
-            if not user_from_cache:
-                user_from_cache = cred_user
-
-        # If user needed but not cached, fetch from API
-        if not user_from_cache and config.get("show", {}).get("user", False):
-            try:
-                token_for_user, _, _ = get_credentials()
-                if token_for_user:
-                    user_from_cache = fetch_user_info(token_for_user)
-            except Exception:
-                pass
+        # Plan and the token for the profile request both come from the
+        # credentials, so read them once.
+        # The profile request only runs when the user segment is on and the
+        # cache carried no name.
+        need_user = not user_from_cache and config.get("show", {}).get("user", False)
+        if not plan_from_cache or need_user:
+            cred_token, cred_plan = get_credentials()
+            plan_from_cache = plan_from_cache or cred_plan or ""
+            if need_user and cred_token:
+                user_from_cache = fetch_user_info(cred_token)
 
         line = build_status_line(usage_from_stdin, plan_from_cache, config, stdin_ctx, user=user_from_cache, cache_age=0)
         _update_session_state(usage_from_stdin, stdin_ctx)
@@ -5759,10 +7219,10 @@ def main():
             _append_context_history(stdin_ctx["context_pct"])
 
         # Write to cache so staleness tracking works
-        write_cache(cache_path, line, usage_from_stdin, plan_from_cache, user_from_cache)
+        write_cache(cache_path, line, usage_from_stdin, plan_from_cache, user=user_from_cache)
 
         line = append_update_indicator(line, config)
-        line = append_claude_update_indicator(line, config)
+        line = append_claude_update_indicator(line, config, stdin_ctx)
         line = _fit_line(line, config)
         sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
         return
@@ -5776,13 +7236,14 @@ def main():
         else:
             line = cached.get("line", "")
         line = append_update_indicator(line, config)
-        line = append_claude_update_indicator(line, config)
+        line = append_claude_update_indicator(line, config, stdin_ctx)
         line = _fit_line(line, config)
         sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
         return
 
     # --- API fallback (first call or no stdin rate limits) ---
-    token, plan, user = get_credentials()
+    token, plan = get_credentials()
+    user = None
     if not token:
         if os.environ.get("ANTHROPIC_API_KEY"):
             line = "API key detected \u2014 claude-pulse requires a Pro/Max subscription"
@@ -5792,12 +7253,12 @@ def main():
         sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
         return
 
-    # If user is not in credentials but needed, try to fetch from API
-    if not user and config.get("show", {}).get("user", False):
-        user = fetch_user_info(token)
-
     try:
         usage = fetch_usage(token)
+        # Profile request only once usage succeeded: a 429 or network error
+        # must not spend a second OAuth call on the name.
+        if config.get("show", {}).get("user", False):
+            user = fetch_user_info(token)
         line = build_status_line(usage, plan, config, stdin_ctx, user=user, cache_age=0)
     except urllib.error.HTTPError as e:
         usage = None
@@ -5815,31 +7276,37 @@ def main():
         elif e.code == 403:
             line = "Access denied \u2014 check your subscription"
         elif e.code == 429:
-            # Rate limited \u2014 serve stale cached data with exponential backoff
+            # Exponential backoff, persisted so the *next* invocation also
+            # holds off. Previously a 429 with usable stale data wrote nothing
+            # back, so every refresh retried immediately and kept the limit lit.
             stale = _read_stale_cache(cache_path)
-            fail_count = (stale.get("_fail_count", 0) + 1) if stale else 1
-            backoff = min(300, 60 * (2 ** (fail_count - 1)))
-            jitter = random.uniform(0, 10)
-            rate_limit_until = time.time() + backoff + jitter
+            delay, fails = _rate_limit_backoff((stale or {}).get("rate_limit_fails"))
+            retry_at = time.time() + delay
 
-            if stale and "usage" in stale:
-                stale_usage = stale["usage"]
-                stale_plan = stale.get("plan", plan)
-                stale_user = stale.get("user", user)
+            stale_usage = stale.get("usage") if stale else None
+            if stale_usage:
+                usage = stale_usage
                 stale_age = time.time() - stale.get("timestamp", time.time())
                 line = build_status_line(
-                    stale_usage, stale_plan, config, stdin_ctx,
-                    user=stale_user, cache_age=stale_age,
+                    usage, stale.get("plan", plan), config, stdin_ctx,
+                    user=stale.get("user", user), cache_age=stale_age,
+                )
+                write_cache(
+                    cache_path, line, usage, stale.get("plan", plan),
+                    user=stale.get("user", user),
+                    rate_limited_until=retry_at, rate_limit_fails=fails,
+                    data_timestamp=stale.get("timestamp"),
                 )
             else:
-                line = "Rate limited \u2014 retrying shortly"
-
-            write_cache(
-                cache_path, line, usage=stale.get("usage") if stale else None,
-                plan=stale.get("plan", plan) if stale else plan,
-                user=stale.get("user", user) if stale else user,
-                rate_limit_until=rate_limit_until, fail_count=fail_count,
-            )
+                mins = max(1, int(delay // 60))
+                line = f"Rate limited \u2014 retrying in {mins} min"
+                write_cache(
+                    cache_path, line,
+                    rate_limited_until=retry_at, rate_limit_fails=fails,
+                )
+            line = _fit_line(line, config)
+            sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
+            return
         else:
             line = f"API error: {e.code}"
     except urllib.error.URLError as e:
@@ -5869,7 +7336,7 @@ def main():
         line = f"Usage unavailable: {type(e).__name__}"
 
     if usage is not None:
-        write_cache(cache_path, line, usage, plan, user)
+        write_cache(cache_path, line, usage, plan, user=user)
         _append_history(usage)
         _update_heatmap(usage)
         # Record hourly analytics sample
@@ -5891,7 +7358,7 @@ def main():
         # Cache error lines so we don't hammer the API on every refresh
         write_cache(cache_path, line)
     line = append_update_indicator(line, config)
-    line = append_claude_update_indicator(line, config)
+    line = append_claude_update_indicator(line, config, stdin_ctx)
     line = _fit_line(line, config)
     sys.stdout.buffer.write((line + RESET + "\n").encode("utf-8"))
 
