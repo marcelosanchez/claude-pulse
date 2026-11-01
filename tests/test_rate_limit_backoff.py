@@ -62,7 +62,7 @@ class RateLimitedRefreshKeepsUsageAgeTest(unittest.TestCase):
         fake_stdin.isatty.return_value = True
         rendered = {}
 
-        def fake_build(usage, plan, config=None, stdin_ctx=None, user=None, cache_age=None):
+        def fake_build(usage, plan, config=None, stdin_ctx=None, cache_age=None, *, user=None):
             rendered["cache_age"] = cache_age
             return "line"
 

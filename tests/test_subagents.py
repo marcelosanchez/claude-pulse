@@ -9,7 +9,7 @@ a session accumulates them quietly. Four surfaces are covered here:
   rendering rather than emit a broken row;
 * the caps widget, whose denominators come from config because Claude Code
   enforces its limits without reporting them;
-* the budget bar, whose ceiling is a claude-pulse setting because
+* the budget bar, whose ceiling is a usage-pulse setting because
   ``--max-budget-usd`` is CLI-only with no settings key or env var.
 
 Run: ``python tests/test_subagents.py``
@@ -238,6 +238,31 @@ class SubagentRowTest(unittest.TestCase):
         row = cs._render_subagent_row(
             {"id": "t", "name": "n" * 40, "status": "running"}, self._cfg(), columns=20)
         self.assertLessEqual(cs._visible_len(row), 20)
+
+    def test_unnamed_task_shows_its_agent_type(self):
+        row = cs._render_subagent_row(
+            {"id": "t", "type": "local_agent", "agentType": "Explore", "status": "running"},
+            self._cfg())
+        self.assertIn("Explore", row)
+        self.assertNotIn("local_agent", row)
+
+    def test_name_wins_over_agent_type(self):
+        row = cs._render_subagent_row(
+            {"id": "t", "name": "reviewer", "agentType": "code-reviewer", "status": "running"},
+            self._cfg())
+        self.assertIn("reviewer", row)
+        self.assertNotIn("code-reviewer", row)
+
+    def test_agent_type_is_sanitised_and_wrong_types_fall_through(self):
+        row = cs._render_subagent_row(
+            {"id": "t", "agentType": "\x1b[31mEvil\x07", "status": "running"}, self._cfg())
+        self.assertNotIn("\x07", row)
+        self.assertNotIn("\x1b[31mEvil", row)
+        for bad in (None, "", 0):
+            row = cs._render_subagent_row(
+                {"id": "t", "agentType": bad, "type": "local_agent", "status": "running"},
+                self._cfg())
+            self.assertIn("local_agent", row)
 
     def test_garbage_task_returns_empty(self):
         for bad in (None, "str", 7, []):
