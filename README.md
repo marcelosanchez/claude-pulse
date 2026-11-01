@@ -285,7 +285,7 @@ Switch any of them with `--show` and `--hide`, or tick them in the wizard. Most 
 | `extra` | off | Extra-usage (bonus) credits. Appears by itself if you have any (`--extra-display`) |
 | `thinking` | off | `think` or `no-think` |
 | `cache` | off | Share of input served from the prompt cache |
-| `cache_warm` | off | Prompt-cache warmth, such as `♨ 92% · 3m` |
+| `cache_warm` | off | Prompt-cache warmth, such as `w 92% 3m` |
 | `pr` | off | Clickable `#123` pull request badge with review state. GitLab merge requests show as `!123` |
 | `repo` | off | `owner/name` of the current repository |
 | `session_name` | off | The name you gave the session with `/rename` |

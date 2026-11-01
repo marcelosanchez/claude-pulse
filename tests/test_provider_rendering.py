@@ -63,10 +63,11 @@ class RenderingTest(unittest.TestCase):
         self.assertEqual(len(rows), 4)  # main + Sunny + Gemini + Codex
         cols = {plain(r).index(" | ") for r in rows}
         self.assertEqual(len(cols), 1, [plain(r) for r in rows])
-        self.assertTrue(plain(rows[0]).startswith("Claude (Defend) 5h "))
-        self.assertTrue(plain(rows[1]).startswith("Claude (Sunny)  5h "))
+        self.assertTrue(plain(rows[0]).startswith("Claude (Defend) Session "))
+        self.assertTrue(plain(rows[1]).startswith("Session "))
+        self.assertTrue(plain(rows[1]).rstrip().endswith("Claude (Sunny)"))
         self.assertIn("Weekly", plain(rows[2]))
-        self.assertTrue(plain(rows[3]).startswith("Codex"))
+        self.assertIn("Codex", plain(rows[3]).rsplit(" | ", 1)[-1])
 
     def test_main_label_needs_rows(self):
         config = dict(self.config, providers=[])
@@ -90,13 +91,13 @@ class RenderingTest(unittest.TestCase):
         self.assertTrue(plain(out).startswith("Session "))
 
     def test_layouts(self):
-        for layout, needle in (("compact", " S "), ("minimal", ""), ("percent-first", "%")):
+        for layout, needle in (("compact", "S "), ("minimal", ""), ("percent-first", "%")):
             config = dict(self.config, layout=layout)
             rows = self._main_line(config).split("\n")
             self.assertEqual(len(rows), 4, layout)
             for r in rows[1:]:
                 self.assertIn(needle, plain(r))
-                self.assertNotIn(" 5h ", plain(r))
+                self.assertNotIn(" Session ", plain(r))
             cols = {plain(r).index(" | ") for r in rows[1:]}
             self.assertEqual(len(cols), 1, layout)
 
@@ -106,7 +107,7 @@ class RenderingTest(unittest.TestCase):
         rows, _ = cs._render_provider_rows(config)
         self.assertEqual(len(rows), 1)
         self.assertEqual(plain(rows[0]).count("--"), 2)
-        self.assertTrue(plain(rows[0]).startswith("k "))
+        self.assertTrue(plain(rows[0]).rstrip().endswith("| k"))
 
     def test_file_label_used(self):
         f = self.sb.root / "kimi.json"
@@ -114,7 +115,7 @@ class RenderingTest(unittest.TestCase):
                      encoding="utf-8")
         config = dict(self.config, providers=[{"id": "file:kimi", "type": "file", "path": str(f)}])
         rows, _ = cs._render_provider_rows(config)
-        self.assertTrue(plain(rows[0]).startswith("Kimi"))
+        self.assertTrue(plain(rows[0]).rstrip().endswith("Kimi"))
         self.assertIn("50%", plain(rows[0]))
 
     def test_update_indicator_stays_on_main_row(self):

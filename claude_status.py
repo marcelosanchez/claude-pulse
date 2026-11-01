@@ -2808,9 +2808,14 @@ def fetch_usage(token, timeout=10):
 
 
 def fetch_user_info(token):
-    """Fetch user info from Anthropic API. Returns first name or None."""
+    """Fetch the OAuth profile: ``(first_name, plan_label)``, each None when unknown
+
+    The plan label (``organization.plan_display_name``, e.g. "Ultra") is what
+    the account is sold as; the rate-limit tier in the credentials file can
+    lag behind it (an Ultra account still reports ``default_claude_max_20x``).
+    """
     if not token:
-        return None
+        return None, None
     try:
         with _authorized_request(
             "https://api.anthropic.com/api/oauth/profile",
@@ -2819,19 +2824,16 @@ def fetch_user_info(token):
             timeout=_USER_TIMEOUT,
         ) as resp:
             data = json.loads(resp.read(50_000))
-            # Extract name from account data structure
-            account = data.get("account", {})
+            account = data.get("account") or {}
+            plan_label = _sanitize(str((data.get("organization") or {}).get("plan_display_name") or "")) or None
             # Only the local part of the e-mail: the bar may be on a shared screen.
             name = (account.get("full_name") or account.get("display_name")
                     or (account.get("email") or "").split("@")[0])
-            if name:
-                name = _sanitize(name)
-                # Extract first name only (before space)
-                first_name = name.split()[0] if " " in name else name
-                return first_name if first_name else None
+            first_name = (_sanitize(str(name)).split() or [""])[0]   # whitespace-only name -> no name
+            return (first_name or None), plan_label
     except Exception:
         pass
-    return None
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -4314,7 +4316,7 @@ def _read_history():
 
 def _append_history(usage):
     """Append a usage sample to history and prune old entries."""
-    five = usage.get("five_hour", {})
+    five = usage.get("five_hour") or {}   # null when the account has no 5-hour window
     seven = usage.get("seven_day", {})
     session_pct = five.get("utilization") or 0
     weekly_pct = seven.get("utilization") or 0
@@ -5548,7 +5550,7 @@ def _get_heatmap_path():
 
 def _update_heatmap(usage):
     """Update the activity heatmap with current usage data."""
-    five = usage.get("five_hour", {})
+    five = usage.get("five_hour") or {}   # null when the account has no 5-hour window
     seven = usage.get("seven_day", {})
     session_pct = five.get("utilization") or 0
     weekly_pct = seven.get("utilization") or 0
@@ -5894,7 +5896,7 @@ def _update_session_state(usage, stdin_ctx):
     try:
         session_id = _get_session_id()
         sessions_dir = _get_sessions_dir()
-        five = usage.get("five_hour", {}) if usage else {}
+        five = (usage.get("five_hour") if usage else None) or {}
         seven = usage.get("seven_day", {}) if usage else {}
         state = {
             "pid": session_id,
@@ -6166,6 +6168,8 @@ def cmd_heatmap():
 
 
 _SPEND_PERIOD_SHORT = {"daily": "day", "weekly": "wk", "monthly": "mo"}
+# Fork: a plain letter instead of the hot-springs emoji, which renders at double width in some terminals.
+CACHE_WARM_GLYPH = "w"
 
 
 def _format_cache_ttl(seconds):
@@ -6338,7 +6342,10 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, cache_age=None, 
                 if reset_str and (runway_str or spark_str or burn_str):
                     reset_str = f" \u00b7{reset}"
                 parts.append((_s, f"{label} {bar_before}{pct:.0f}%{burn_str}{pace_str}{spark_str}{runway_str}{reset_str}"))
-        else:
+        elif not usage.get("seven_day"):
+            # No data at all yet: draw the empty placeholder. With a weekly
+            # window but no 5-hour one, the account has no 5-hour limit (the
+            # API reports five_hour as null) and a 0% bar would be a lie.
             _s = _pri("session")
             bar = make_bar(0, theme, plain=bar_plain, width=bw, bar_style=bstyle)
             bar_before, bar_after = _bar_fields("session", bar)
@@ -6634,21 +6641,24 @@ def build_status_line(usage, plan, config=None, stdin_ctx=None, cache_age=None, 
             if warm is False:
                 parts.append((_pri("cache_warm"), f"{DIM}cache cold{RESET}"))
             elif warm:
+                # Fork: only the glyph carries the hit colour, in the muted
+                # palette; the numbers keep the bar's text colour like every
+                # other percentage on the line.
                 if hit is not None:
-                    hit_colour = GREEN if hit >= 70 else (YELLOW if hit >= 40 else RED)
+                    hit_colour = GREEN_DARK if hit >= 70 else (YELLOW_DARK if hit >= 40 else YELLOW_RED_DARK)
                 else:
-                    hit_colour = GREEN
+                    hit_colour = GREEN_DARK
+                glyph = f"{hit_colour}{CACHE_WARM_GLYPH}{RESET}"
                 ttl_txt = _format_cache_ttl(remaining) if remaining is not None else ""
-                ttl_colour = YELLOW if remaining is not None and remaining < 60 else DIM
                 if layout == "minimal":
                     body = f"{hit:.0f}%" if hit is not None else ttl_txt
-                    parts.append((_pri("cache_warm"), f"{hit_colour}♨{body}{RESET}"))
+                    parts.append((_pri("cache_warm"), f"{glyph}{body}"))
                 else:
-                    head = f"{hit_colour}♨ {hit:.0f}%{RESET}" if hit is not None else f"{hit_colour}♨{RESET}"
+                    head = f"{glyph} {hit:.0f}%" if hit is not None else glyph
                     if hit is not None and ttl_txt:
-                        parts.append((_pri("cache_warm"), f"{head} {ttl_colour}· {ttl_txt}{RESET}"))
+                        parts.append((_pri("cache_warm"), f"{head} {ttl_txt}"))
                     elif ttl_txt:
-                        parts.append((_pri("cache_warm"), f"{head} {ttl_colour}{ttl_txt}{RESET}"))
+                        parts.append((_pri("cache_warm"), f"{head} {ttl_txt}"))
                     else:
                         parts.append((_pri("cache_warm"), head))
         except (TypeError, ValueError, OverflowError):
@@ -7698,7 +7708,7 @@ def _provider_label_width(config, entries=None):
 
 
 def _provider_session_label(config):
-    """``Claude (Work) 5h`` for the main line's session bar, or None.
+    """``Claude (Work) Session`` for the main line's session bar, or None.
 
     Only when provider rows are actually drawn, so a user without providers
     keeps the familiar ``Session`` label.
@@ -7711,7 +7721,7 @@ def _provider_session_label(config):
     if not entries:
         return None
     width = _provider_label_width(config, entries)
-    return f"{_provider_main_label(config).ljust(width)} 5h"
+    return f"{_provider_main_label(config).ljust(width)} Session"
 
 
 def _provider_bar_width(config, label_width):
@@ -7758,7 +7768,9 @@ def _render_provider_row(label, usage, config, label_width, bar_width, stale=Fal
     show = config.get("show", DEFAULT_SHOW)
     usage = usage or {}
 
-    def _window(key):
+    pace_style = config.get("pace_style", DEFAULT_PACE_STYLE)
+
+    def _window(key, window_seconds):
         w = usage.get(key)
         if not w or w.get("utilization") is None:
             bar = make_bar(0, theme, plain=True, width=bar_width, bar_style=bstyle)
@@ -7767,25 +7779,30 @@ def _render_provider_row(label, usage, config, label_width, bar_width, stale=Fal
         bar = make_bar(pct, theme, plain=use_rainbow and not stale, width=bar_width,
                        bar_style=bstyle, flash_color=DIM if stale else None, config=config)
         pct_txt = f"{DIM}~{pct:.0f}%{RESET}" if stale else f"{pct:.0f}%"
+        # Same pace arrow as the main line's windows (fork); none on stale data.
+        if show.get("pace") and not stale:
+            pct_txt += _format_pace(pct, _calc_pace_pct(w.get("resets_at"), window_seconds), pace_style)
         return bar, pct_txt, w.get("resets_at")
 
-    head = label.ljust(label_width)
+    # Fork: the label goes last as "Label (Tier)", like the main line's
+    # "Name (Plan)" segment, so the row reads like the Claude bar.
+    head = ""
     if show.get("session", True):
-        bar, pct_txt, resets = _window("five_hour")
+        bar, pct_txt, resets = _window("five_hour", 18000)
         reset = format_reset_time(resets) if resets and show.get("timer", True) else None
         reset_str = f" {reset}" if reset else ""
         if layout == "compact":
-            head += f" S {bar} {pct_txt}{reset_str}"
+            head = f"S {bar} {pct_txt}{reset_str}"
         elif layout == "minimal":
-            head += f" {bar} {pct_txt}{reset_str}"
+            head = f"{bar} {pct_txt}{reset_str}"
         elif layout == "percent-first":
-            head += f" {pct_txt} {bar}{reset_str}"
+            head = f"{pct_txt} {bar}{reset_str}"
         else:
-            head += f" 5h {bar} {pct_txt}{reset_str}"
+            head = f"Session {bar} {pct_txt}{reset_str}"
 
     tail = ""
     if show.get("weekly", True):
-        bar, pct_txt, resets = _window("seven_day")
+        bar, pct_txt, resets = _window("seven_day", 604800)
         wr_str = ""
         if resets and show.get("weekly_timer", True):
             wt_fmt = config.get("weekly_timer_format", DEFAULT_WEEKLY_TIMER_FORMAT)
@@ -7806,8 +7823,11 @@ def _render_provider_row(label, usage, config, label_width, bar_width, stale=Fal
             tail = f"{pct_txt} {bar}{wr_str}"
         else:
             tail = f"Weekly {bar} {pct_txt}{wr_str}"
+    name = _sanitize(str(label))
     if tier and show.get("plan", False):
-        tail = f"{tail} {DIM}{tier}{RESET}" if tail else f"{DIM}{tier}{RESET}"
+        name = f"{name} ({_sanitize(str(tier))})"
+    name_seg = f"{PURPLE_USER}{name}{RESET}"
+    tail = f"{tail} | {name_seg}" if tail else name_seg
     return head, tail
 
 
@@ -7839,7 +7859,7 @@ def _render_provider_rows(config, now=None, main_col=None):
     out = []
     for head, tail in built:
         pad = " " * max(0, col - _visible_len(head))
-        row = f"{head}{pad} | {tail}" if tail else head
+        row = f"{head}{pad} | {tail}" if head else tail
         if use_rainbow:
             row = rainbow_colorize(row, color_all=False, shimmer=animate, config=config)
         elif text_color:
@@ -11331,7 +11351,8 @@ def main():
                             model_caps_fetched_at=_caps_ts,
                             rate_limited_until=_rl_until, rate_limit_fails=_rl_fails,
                             model_caps_attempted_at=_caps_attempted)
-                user_from_cache = fetch_user_info(cred_token)
+                user_from_cache, _profile_plan = fetch_user_info(cred_token)
+                plan_from_cache = _profile_plan or plan_from_cache
 
         line = build_status_line(usage_from_stdin, plan_from_cache, config, stdin_ctx, user=user_from_cache, cache_age=0)
         _update_session_state(usage_from_stdin, stdin_ctx)
@@ -11384,8 +11405,9 @@ def main():
         usage = fetch_usage(token)
         # Profile request only once usage succeeded: a 429 or network error
         # must not spend a second OAuth call on the name.
-        if config.get("show", {}).get("user", False):
-            user = user or fetch_user_info(token)
+        if config.get("show", {}).get("user", False) and not user:
+            user, _profile_plan = fetch_user_info(token)
+            plan = _profile_plan or plan
         line = build_status_line(usage, plan, config, stdin_ctx, user=user, cache_age=0)
     except urllib.error.HTTPError as e:
         usage = None
@@ -11468,7 +11490,7 @@ def main():
         _update_heatmap(usage)
         # Record hourly analytics sample
         try:
-            usage_pct = usage.get("five_hour", {}).get("utilization", 0)
+            usage_pct = (usage.get("five_hour") or {}).get("utilization") or 0
             record_hourly_sample(usage_pct)
         except Exception:
             pass

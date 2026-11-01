@@ -57,22 +57,22 @@ class CacheWarmWidgetTest(unittest.TestCase):
         return ctx
 
     def test_off_by_default(self):
-        self.assertNotIn("♨", render({}, self._warm()))
+        self.assertNotIn("92%", render({}, self._warm()))
         self.assertFalse(cs.DEFAULT_SHOW["cache_warm"])
 
     def test_warm_standard_shows_hit_and_time_left(self):
         line = render({"cache_warm": True}, self._warm())
-        self.assertIn("♨ 92% · 3m", line)
+        self.assertIn(f"{cs.CACHE_WARM_GLYPH} 92% 3m", line)
 
     def test_every_layout_renders_it(self):
         for layout in LAYOUTS:
             line = render({"cache_warm": True}, self._warm(), layout)
-            self.assertIn("♨", line, layout)
+            self.assertIn(cs.CACHE_WARM_GLYPH, line, layout)
             self.assertIn("92%", line, layout)
 
     def test_minimal_is_shortened(self):
         line = render({"cache_warm": True}, self._warm(), "minimal")
-        self.assertIn("♨92%", line)
+        self.assertIn(f"{cs.CACHE_WARM_GLYPH}92%", line)
         self.assertNotIn("3m", line)
 
     def test_cold_cache(self):
@@ -84,7 +84,7 @@ class CacheWarmWidgetTest(unittest.TestCase):
     def test_expired_expiry_counts_as_cold_even_if_persisted_as_warm(self):
         line = render({"cache_warm": True}, self._warm(prompt_cache_expires_at=time.time() - 5))
         self.assertIn("cache cold", line)
-        self.assertNotIn("♨", line)
+        self.assertNotIn("%", line)
 
     def test_unknown_state_renders_nothing(self):
         for ctx in ({}, {"prompt_cache_warm": None}, {"prompt_cache_hit_pct": 50.0}):
@@ -92,13 +92,13 @@ class CacheWarmWidgetTest(unittest.TestCase):
 
     def test_missing_hit_ratio_still_shows_the_countdown(self):
         line = render({"cache_warm": True}, self._warm(prompt_cache_hit_pct=None))
-        self.assertIn("♨", line)
+        self.assertIn(cs.CACHE_WARM_GLYPH, line)
         self.assertIn("3m", line)
         self.assertNotIn("%", line)
 
     def test_last_minute_counts_in_seconds(self):
         line = render({"cache_warm": True}, self._warm(prompt_cache_expires_at=time.time() + 30))
-        self.assertRegex(line, r"· (29|30)s")
+        self.assertRegex(line, r"% (29|30)s")
 
     def test_garbage_values_never_raise(self):
         for bad in ("x", [], {}, True, float("nan")):
@@ -225,7 +225,7 @@ class PriorityTest(unittest.TestCase):
         ctx.update(spend())
         line = render({"cache_warm": True, "repo": True, "session_name": True,
                        "cache": False}, ctx)
-        order = [line.index(t) for t in ("spend", "♨", "sess", "o/r")]
+        order = [line.index(t) for t in ("spend", f"{cs.CACHE_WARM_GLYPH} 90%", "sess", "o/r")]
         self.assertEqual(order, sorted(order))
 
 
@@ -297,7 +297,7 @@ class PersistenceThroughMainTest(unittest.TestCase):
             rate_limits={"spend_limit": {"used_percentage": 25, "resets_at": now + 86400,
                                          "used_usd": 12.4, "limit_usd": 50, "period": "weekly"}})
         line = self._repaint(full)
-        for text in ("refactor auth", "o/r", "♨ 92%", "spend $12.40/$50 wk"):
+        for text in ("refactor auth", "o/r", f"{cs.CACHE_WARM_GLYPH} 92%", "spend $12.40/$50 wk"):
             self.assertIn(text, line)
 
         # A config dir other than ~/.claude keeps its state under accounts/<key>.
@@ -308,7 +308,7 @@ class PersistenceThroughMainTest(unittest.TestCase):
 
         # A fragment (no session identity) repaint keeps all of it.
         line = self._repaint({"cost": {"total_cost_usd": 0.5}})
-        for text in ("refactor auth", "o/r", "♨ 92%", "spend $12.40/$50 wk"):
+        for text in ("refactor auth", "o/r", f"{cs.CACHE_WARM_GLYPH} 92%", "spend $12.40/$50 wk"):
             self.assertIn(text, line)
 
     def test_a_full_payload_without_the_fields_clears_the_badges(self):
@@ -318,7 +318,7 @@ class PersistenceThroughMainTest(unittest.TestCase):
             prompt_cache={"warm": True, "hit_ratio": 0.92, "expires_at": now + 180}))
         line = self._repaint(self._full())
         self.assertNotIn("refactor auth", line)
-        self.assertNotIn("♨", line)
+        self.assertNotIn("92%", line)
 
 
 if __name__ == "__main__":

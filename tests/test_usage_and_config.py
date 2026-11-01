@@ -14,6 +14,7 @@ Three separate concerns, all of which decide what numbers the user sees:
 
 Run: ``python tests/test_usage_and_config.py``
 """
+import json
 import os
 import sys
 import unittest
@@ -362,6 +363,40 @@ class ScanPricesEntriesByTheirOwnDateTest(unittest.TestCase):
         stands, which after the cutoff is the list price."""
         result = self._scan([self._entry("claude-sonnet-5", None)])
         self.assertAlmostEqual(result["models"]["claude-sonnet-5"]["cost_usd"], 2.0)
+
+
+class NullSessionWindowTest(unittest.TestCase):
+    """The usage API reports ``five_hour: null`` for accounts without a 5-hour
+    window; the side effects after the render must not raise on it."""
+
+    def test_history_and_heatmap_accept_a_null_window(self):
+        usage = {"five_hour": None, "seven_day": {"utilization": 10, "resets_at": None}}
+        with mock.patch.object(cs, "_secure_open_write", side_effect=OSError):
+            cs._append_history(usage)
+            cs._update_heatmap(usage)
+        line = cs.build_status_line(usage, "Max 20x", {"show": {"session": True, "weekly": True}})
+        self.assertNotIn("Session", line)   # no 5-hour limit: no 0% placeholder
+        self.assertIn("Weekly", line)
+        empty = cs.build_status_line({}, "", {"show": {"session": True, "weekly": True}})
+        self.assertIn("Session", empty)     # no data at all: placeholder stays
+
+
+class ProfileTest(unittest.TestCase):
+    """The profile gives the first name and the plan the account is sold as."""
+
+    def _profile(self, payload):
+        resp = mock.MagicMock()
+        resp.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        with mock.patch.object(cs, "_authorized_request", return_value=resp):
+            return cs.fetch_user_info("tok")
+
+    def test_name_and_plan_label(self):
+        self.assertEqual(self._profile({"account": {"full_name": "Ada Lovelace"},
+                                        "organization": {"plan_display_name": "Ultra"}}),
+                         ("Ada", "Ultra"))
+
+    def test_email_fallback_keeps_only_the_local_part(self):
+        self.assertEqual(self._profile({"account": {"email": "ada@example.com"}}), ("ada", None))
 
 
 class StaleCacheShapeTest(unittest.TestCase):
