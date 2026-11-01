@@ -2536,7 +2536,8 @@ _USAGE_CACHE_KEYS = {
 def write_cache(cache_path, line, usage=None, plan=None,
                 rate_limited_until=None, rate_limit_fails=None,
                 data_timestamp=None, model_caps_fetched_at=None,
-                model_caps_attempted_at=None, *, user=None, user_attempted_at=None):
+                model_caps_attempted_at=None, *, user=None, user_attempted_at=None,
+                plan_label=None):
     """Persist the rendered line plus optional usage/plan and 429 backoff state.
 
     ``rate_limited_until`` is an epoch after which it is worth calling the API
@@ -2552,7 +2553,9 @@ def write_cache(cache_path, line, usage=None, plan=None,
     ``user`` is the display name for the user segment. It is cached so stdin
     and cache repaints skip the profile request. ``user_attempted_at`` is the
     epoch of the last profile request, so a failed one is not retried on every
-    repaint (same idea as ``model_caps_attempted_at``).
+    repaint (same idea as ``model_caps_attempted_at``). ``plan_label`` is the
+    plan name from the profile ("Ultra"); it outlives the cache TTL because the
+    credentials file only carries the rate-limit tier ("Max 20x").
 
     """
     try:
@@ -2567,6 +2570,8 @@ def write_cache(cache_path, line, usage=None, plan=None,
             data["user"] = user
         if user_attempted_at:
             data["user_attempted_at"] = user_attempted_at
+        if plan_label:
+            data["plan_label"] = plan_label
         if rate_limited_until:
             data["rate_limited_until"] = rate_limited_until
             data["rate_limited"] = True
@@ -11218,6 +11223,7 @@ def main():
         _stale = _read_stale_cache(cache_path)
         # The first name never changes: an expired cache is still right.
         user_from_cache = user_from_cache or (_stale or {}).get("user")
+        _plan_label = (cached or {}).get("plan_label") or (_stale or {}).get("plan_label")
         _stale_usage = (_stale or {}).get("usage")
         if isinstance(_stale_usage, dict):
             for key, value in _stale_usage.items():
@@ -11276,7 +11282,7 @@ def main():
                             model_caps_fetched_at=_caps_ts,
                             rate_limited_until=_rl_until,
                             rate_limit_fails=_rl_fails,
-                            user=user_from_cache, user_attempted_at=_user_attempted,
+                            user=user_from_cache, user_attempted_at=_user_attempted, plan_label=_plan_label,
                             model_caps_attempted_at=_caps_attempted)
                 token, api_plan = get_credentials()
                 if token:
@@ -11297,7 +11303,7 @@ def main():
                     _rl_fails = None
                     write_cache(cache_path, "", usage=usage_from_stdin,
                                 plan=plan_from_cache, user=user_from_cache,
-                                user_attempted_at=_user_attempted,
+                                user_attempted_at=_user_attempted, plan_label=_plan_label,
                                 model_caps_fetched_at=_caps_ts,
                                 model_caps_attempted_at=_caps_attempted)
             except urllib.error.HTTPError as exc:
@@ -11322,7 +11328,7 @@ def main():
                                 model_caps_fetched_at=_caps_ts,
                                 rate_limited_until=_rl_until,
                                 rate_limit_fails=_rl_fails,
-                                user=user_from_cache, user_attempted_at=_user_attempted,
+                                user=user_from_cache, user_attempted_at=_user_attempted, plan_label=_plan_label,
                                 model_caps_attempted_at=_caps_attempted)
             except Exception:
                 pass
@@ -11336,7 +11342,9 @@ def main():
         _user_recent = (time.time() - _cache_epoch(_user_attempted)) < _USER_RETRY
         # _rl_until, not _backoff_active: a 429 from the caps refresh above
         # must also stop this request in the same run.
-        need_user = (not user_from_cache and config.get("show", {}).get("user", False)
+        _show = config.get("show", {})
+        need_user = ((not user_from_cache or not _plan_label)
+                     and (_show.get("user", False) or _show.get("plan", False))
                      and time.time() >= _cache_epoch(_rl_until) and not _user_recent)
         if not plan_from_cache or need_user:
             cred_token, cred_plan = get_credentials()
@@ -11347,12 +11355,14 @@ def main():
                 # next repaint.
                 _user_attempted = time.time()
                 write_cache(cache_path, "", usage=usage_from_stdin, plan=plan_from_cache,
-                            user=user_from_cache, user_attempted_at=_user_attempted,
+                            user=user_from_cache, user_attempted_at=_user_attempted, plan_label=_plan_label,
                             model_caps_fetched_at=_caps_ts,
                             rate_limited_until=_rl_until, rate_limit_fails=_rl_fails,
                             model_caps_attempted_at=_caps_attempted)
-                user_from_cache, _profile_plan = fetch_user_info(cred_token)
-                plan_from_cache = _profile_plan or plan_from_cache
+                _name, _label = fetch_user_info(cred_token)
+                user_from_cache = _name or user_from_cache
+                _plan_label = _label or _plan_label
+        plan_from_cache = _plan_label or plan_from_cache
 
         line = build_status_line(usage_from_stdin, plan_from_cache, config, stdin_ctx, user=user_from_cache, cache_age=0)
         _update_session_state(usage_from_stdin, stdin_ctx)
@@ -11362,7 +11372,7 @@ def main():
 
         # Write to cache so staleness tracking works
         write_cache(cache_path, line, usage_from_stdin, plan_from_cache, user=user_from_cache,
-                    user_attempted_at=_user_attempted,
+                    user_attempted_at=_user_attempted, plan_label=_plan_label,
                     model_caps_fetched_at=_caps_ts,
                     rate_limited_until=_rl_until, rate_limit_fails=_rl_fails,
                     model_caps_attempted_at=_caps_attempted)
@@ -11390,7 +11400,10 @@ def main():
 
     # --- API fallback (first call or no stdin rate limits) ---
     token, plan = get_credentials()
-    user = (_read_stale_cache(cache_path) or {}).get("user")
+    _fallback_stale = _read_stale_cache(cache_path) or {}
+    user = _fallback_stale.get("user")
+    _plan_label = _fallback_stale.get("plan_label")
+    plan = _plan_label or plan
     if not token:
         if os.environ.get("ANTHROPIC_API_KEY"):
             line = "API key detected \u2014 usage-pulse requires a Pro/Max subscription"
@@ -11405,9 +11418,12 @@ def main():
         usage = fetch_usage(token)
         # Profile request only once usage succeeded: a 429 or network error
         # must not spend a second OAuth call on the name.
-        if config.get("show", {}).get("user", False) and not user:
-            user, _profile_plan = fetch_user_info(token)
-            plan = _profile_plan or plan
+        _show = config.get("show", {})
+        if (_show.get("user", False) or _show.get("plan", False)) and (not user or not _plan_label):
+            _name, _label = fetch_user_info(token)
+            user = _name or user
+            _plan_label = _label or _plan_label
+            plan = _plan_label or plan
         line = build_status_line(usage, plan, config, stdin_ctx, user=user, cache_age=0)
     except urllib.error.HTTPError as e:
         usage = None
@@ -11485,7 +11501,7 @@ def main():
         line = f"Usage unavailable: {type(e).__name__}"
 
     if usage is not None:
-        write_cache(cache_path, line, usage, plan, user=user)
+        write_cache(cache_path, line, usage, plan, user=user, plan_label=_plan_label)
         _append_history(usage)
         _update_heatmap(usage)
         # Record hourly analytics sample

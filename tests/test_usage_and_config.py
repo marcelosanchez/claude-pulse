@@ -399,6 +399,42 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(self._profile({"account": {"email": "ada@example.com"}}), ("ada", None))
 
 
+class PlanLabelSurvivesTtlTest(unittest.TestCase):
+    """The profile's plan ("Ultra") must outlive the cache TTL: the credentials
+    file only carries the tier ("Max 20x") and the name alone never re-asks."""
+
+    def test_expired_cache_keeps_the_profile_plan(self):
+        import io, re, tempfile, time
+        payload = json.dumps({"session_id": "s", "context_window": {"used_percentage": 1},
+                              "rate_limits": {"seven_day": {"used_percentage": 11}}})
+        calls = []
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"XDG_CACHE_HOME": td, "LOCALAPPDATA": td}):
+            cfg = cs.load_config()
+            cfg["show"].update(user=True, plan=True, fable=False, opus=False, sonnet=False)
+
+            def repaint():
+                out = io.BytesIO()
+                stdin = io.StringIO(payload)
+                stdin.isatty = lambda: False
+                with mock.patch.object(cs, "load_config", lambda: cfg), \
+                        mock.patch.object(cs, "get_credentials", lambda: ("tok", "Max 20x")), \
+                        mock.patch.object(cs, "fetch_user_info",
+                                          lambda tok: calls.append(1) or ("Ada", "Ultra")), \
+                        mock.patch.object(sys, "argv", ["claude_status.py"]), \
+                        mock.patch.object(sys, "stdin", stdin), \
+                        mock.patch.object(sys, "stdout", mock.Mock(buffer=out)):
+                    cs.main()
+                return re.sub(r"\x1b\[[0-9;]*m", "", out.getvalue().decode())
+
+            self.assertIn("Ada (Ultra)", repaint())
+            cache = json.load(open(cs.get_cache_path()))
+            cache["timestamp"] = time.time() - 3600          # TTL long gone
+            json.dump(cache, open(cs.get_cache_path(), "w"))
+            self.assertIn("Ada (Ultra)", repaint())
+            self.assertEqual(len(calls), 1)
+
+
 class StaleCacheShapeTest(unittest.TestCase):
     """_read_stale_cache feeds the 429 fallback; raising there prints nothing."""
 
