@@ -178,7 +178,7 @@ Providers add one row per *other* subscription under the main line. `--detect-pr
 | What | Id | Where it is read from |
 |---|---|---|
 | Other Claude Code accounts | `claude:default`, `claude:<suffix>` (for example `claude:b` for `~/.claude-b`) | Every `~/.claude*` folder that holds a `.credentials.json` |
-| Codex CLI | `codex` | Session files under `~/.codex` |
+| Codex CLI | `codex` | ChatGPT's usage API with the Codex CLI's login in `~/.codex/auth.json`, session files under `~/.codex` as the fallback |
 | Google Antigravity (Gemini) | `gemini`, `gemini:<suffix>` | `statusline_last_live.json` under `~/.gemini/antigravity-cli*` |
 | MiniMax | `minimax` | The `mmx` CLI on your PATH. Never switched on automatically |
 | Anything else | `file:<name>` | A JSON file that any tool can write |
@@ -194,7 +194,8 @@ The sub-commands are `list`, `detect`, `enable`, `disable`, `label`, `remove` an
 
 - Rows use the main line's theme, bar style and size. With `providers_label_main` on (the default) the main line's `Session` label becomes `Claude (<label>) 5h` so everything lines up.
 - **Another Claude account** uses that account's own token, read from its `.credentials.json`. It is never refreshed, stored or logged. At most one usage-API call per account every `providers_refresh_seconds` (300 by default, 60 at the lowest), never more than one a minute, with back-off on 429 and a 15-minute pause on 401 or 403. Each window also saves its own account's numbers from stdin, so with both windows open no API call is made at all.
-- **Codex and Gemini** rows are read from local files only: the last values seen, never a network call.
+- **Codex** asks `chatgpt.com/backend-api/wham/usage` (the endpoint the Codex CLI itself uses) at most every `providers_refresh_seconds`, with the token from `~/.codex/auth.json`. The pool is shared with ChatGPT on the web and every other machine on the account, so local session files alone fall behind. The token is never refreshed, stored or logged; once it expires the row falls back to the newest session file until the Codex CLI renews it on its next use. A machine that never ran the CLI needs `codex login` once.
+- **Gemini** rows are read from local files only: the last values seen, never a network call.
 - **MiniMax** runs `mmx` to read its quota, which is why it is never on by default, and it is hidden while the window itself runs on MiniMax.
 - A row whose data is more than 30 minutes old is drawn dim with a `~` in front of the number, such as `~29%`.
 
@@ -517,8 +518,9 @@ Inside Claude Code: /pulse (or /pulse setup) does all of this by asking you.
 │  files that the next repaint reads            │
 ├───────────────────────────────────────────────┤
 │  Provider rows (optional)                     │
-│  Local files for Codex, Gemini, JSON files;   │
-│  one cached usage call per other Claude acct  │
+│  Local files for Gemini, JSON files; one      │
+│  cached usage call per other Claude account   │
+│  and for Codex (chatgpt.com)                  │
 ├───────────────────────────────────────────────┤
 │  Cache layer                                  │
 │  Exchange rates (24h) · update checks (1h)    │
@@ -533,7 +535,7 @@ Claude Code sends `rate_limits` on stdin, so the main bars need no OAuth call an
 <summary><b>Security</b></summary>
 
 - **No API calls for the main usage bars.** They come straight from Claude Code's stdin.
-- **Tokens only go to Anthropic.** OAuth tokens are sent only to `api.anthropic.com` (usage) and `platform.claude.com` (renewing your own expired token, kept in memory and never written back). A hardcoded allowlist enforces this, and redirects to any other host are blocked.
+- **Each token only goes to its owner.** Claude OAuth tokens are sent only to `api.anthropic.com` (usage) and `platform.claude.com` (renewing your own expired token, kept in memory and never written back). A hardcoded allowlist enforces this, and redirects to any other host are blocked. The Codex CLI's token, only when the Codex row is on, is sent only to `chatgpt.com`, with every redirect blocked, and is never refreshed.
 - **Other accounts' tokens are read, never changed.** For a provider row the token is read from that account's `.credentials.json` and is never refreshed, stored or logged. Refreshing it would rotate the refresh token and sign that account out.
 - **No e-mail addresses or account names are read.** Labels come from your config or from the folder name.
 - **Settings are backed up** before Usage Pulse first writes `settings.json`, and `--install-hooks` refuses to replace a file that is not valid JSON.
@@ -556,7 +558,7 @@ Claude Code sends `rate_limits` on stdin, so the main bars need no OAuth call an
 | Setup says `settings.json` is invalid | Fix the JSON it names and run setup again. Nothing was changed |
 | Replaced my old status line by mistake | Setup prints the old command. Earlier copies of `settings.json` are in `settings-backups/` in the state folder |
 | A provider row is missing | `--providers list` shows what is configured and `--detect-providers` what exists. Check that the `providers` widget is on |
-| A Claude or MiniMax row shows `~29%` with dim bars | The data is more than 30 minutes old. Use that account once, or wait for the next refresh |
+| A Claude, Codex or MiniMax row shows `~29%` with dim bars | The data is more than 30 minutes old. Use that account once, or wait for the next refresh. For Codex, an expired login: run any `codex` command or `codex login` |
 | A provider row shows `--` | The source could not be read yet: no token, a missing file, or no rate-limit data in the newest Codex session |
 | "Rate limited" message | The main bars read stdin, so they keep working. API-backed parts back off before retrying |
 | `--update` says it cannot reach GitHub | Both the GitHub API and `git ls-remote` failed. Check the network; the unauthenticated API alone is not needed since 3.4.1 |

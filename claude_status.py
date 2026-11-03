@@ -3,6 +3,7 @@
 
 VERSION = "3.6.0"
 
+import base64
 import hashlib
 import json
 import math
@@ -2967,6 +2968,11 @@ _PROVIDER_FILE_MAX = 1_000_000    # bytes; agy / custom JSON files
 _CODEX_TAIL_BYTES = 2_000_000     # rollouts reach ~100 MB; read only the tail
 _CODEX_DAY_DIRS = 2
 _CODEX_MAX_FILES = 3
+# SECURITY: the Codex CLI's ChatGPT token is only sent here, never to the
+# Anthropic allowlist, and never refreshed: OpenAI rotates the refresh token,
+# so a refresh would log the Codex CLI out
+_CODEX_TOKEN_DOMAINS = frozenset({"chatgpt.com"})
+_CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _MINIMAX_PROVIDER_TTL = 120
 _GEMINI_BUCKETS = {
     "gemini": ("gemini-5h", "gemini-weekly"),
@@ -3769,6 +3775,139 @@ def _read_codex_quota(codex_home, cached=None, now=None):
     return {"usage": {}, "data_ts": None, "tier": None, "src": src, "changed": True}
 
 
+class _CodexNoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect: urllib would forward the bearer header, even to http"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(newurl, code, "Codex usage redirect blocked", headers, fp)
+
+
+_codex_opener = urllib.request.build_opener(_CodexNoRedirectHandler)
+
+
+def _read_codex_token(codex_home, now=None):
+    """``(access_token, account_id)`` from ``auth.json``; ``(None, None)`` when
+    missing, not a ChatGPT login, or already expired (read only, never refreshed)
+    """
+    now = time.time() if now is None else now
+    try:
+        data, _ = _read_small_json(Path(codex_home) / "auth.json")
+    except (OSError, ValueError, TypeError):
+        return None, None
+    tokens = data.get("tokens") if isinstance(data, dict) else None
+    token = tokens.get("access_token") if isinstance(tokens, dict) else None
+    if not isinstance(token, str) or not token:
+        return None, None
+    try:
+        part = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+        if float(claims["exp"]) <= now + 60:
+            return None, None
+    except (IndexError, KeyError, TypeError, ValueError):
+        pass  # opaque token: let the server judge it
+    account = tokens.get("account_id")
+    return token, account if isinstance(account, str) else None
+
+
+def _fetch_codex_usage(token, account_id, now=None):
+    """GET the ChatGPT usage endpoint the Codex CLI uses; ``(usage, tier)``"""
+    domain = urlparse(_CODEX_USAGE_URL).hostname
+    if domain not in _CODEX_TOKEN_DOMAINS:
+        raise ValueError("Codex token request blocked")
+    hdrs = {"Authorization": f"Bearer {token}", "Accept": "application/json",
+            "User-Agent": f"usage-pulse/{VERSION}"}
+    if account_id:
+        hdrs["ChatGPT-Account-Id"] = account_id
+    req = urllib.request.Request(_CODEX_USAGE_URL, headers=hdrs)
+    with _codex_opener.open(req, timeout=_PROVIDER_TIMEOUT) as resp:
+        data = json.loads(resp.read(256_000))
+    rl = data.get("rate_limit") if isinstance(data, dict) else None
+    if not isinstance(rl, dict):
+        raise ValueError("unexpected Codex usage payload")
+    # same RateLimitSnapshot shape the rollout files carry
+    snapshot = {}
+    for src, dst in (("primary_window", "primary"), ("secondary_window", "secondary")):
+        w = rl.get(src)
+        if isinstance(w, dict):
+            secs = w.get("limit_window_seconds")
+            snapshot[dst] = {
+                "used_percent": w.get("used_percent"),
+                "window_minutes": secs / 60 if isinstance(secs, (int, float)) else None,
+                "resets_at": w.get("reset_at")}
+    plan = data.get("plan_type")
+    tier = _clean_provider_label(plan.replace("_", " ").title()) if isinstance(plan, str) else None
+    return _codex_usage_from_rate_limits(snapshot, now), tier
+
+
+def _refresh_codex_api(entry, config, now=None, budget=None):
+    """Cache of the Codex API row (``<id>:api``), refreshed when due
+
+    Same gates as ``_refresh_claude_provider``: refresh interval, backoffs,
+    60 s between attempts, one network call per repaint, attempt stamped first.
+    """
+    now = time.time() if now is None else now
+    pid = entry["id"] + ":api"
+    cache = _read_provider_cache(pid) or {}
+
+    def _num(key):
+        try:
+            return float(cache.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    if now - _num("timestamp") < _provider_refresh_seconds(config) \
+            or now < _num("auth_failed_until") or now < _num("error_until") \
+            or now < _num("rate_limited_until") \
+            or now - _num("last_attempt") < _PROVIDER_RETRY \
+            or (budget is not None and budget[0] <= 0):
+        return cache
+    loc = _provider_location(entry)
+    token, account = _read_codex_token(loc, now) if loc else (None, None)
+    if not token:
+        return cache
+    lock = _acquire_provider_lock(pid)
+    if lock is None:
+        return cache
+    try:
+        cache = _read_provider_cache(pid) or cache
+        if now - _num("timestamp") < _provider_refresh_seconds(config) \
+                or now - _num("last_attempt") < _PROVIDER_RETRY:
+            return cache
+        if budget is not None:
+            budget[0] -= 1
+        cache = dict(cache)
+        cache["last_attempt"] = now
+        if not _write_provider_cache(pid, cache):
+            return cache
+        try:
+            usage, tier = _fetch_codex_usage(token, account, now)
+            token = None
+            if not usage:
+                raise ValueError("no Codex windows")
+            fresh = {"timestamp": time.time(), "usage": usage,
+                     "plan": tier or cache.get("plan"), "last_attempt": now}
+            _write_provider_cache(pid, fresh)
+            return fresh
+        except urllib.error.HTTPError as exc:
+            code = getattr(exc, "code", None)
+            if code == 429:
+                delay, fails = _rate_limit_backoff(cache.get("rate_limit_fails"))
+                cache["rate_limited_until"] = now + delay
+                cache["rate_limit_fails"] = fails
+            elif code in (401, 403):
+                # the Codex CLI renews its own token on next use
+                cache["auth_failed_until"] = now + _PROVIDER_AUTH_BACKOFF
+            else:
+                cache["error_until"] = now + _PROVIDER_ERROR_BACKOFF
+        except Exception:
+            cache["error_until"] = now + _PROVIDER_ERROR_BACKOFF
+        token = None
+        _write_provider_cache(pid, cache)
+        return cache
+    finally:
+        _release_provider_lock(lock)
+
+
 # --- MiniMax (mmx CLI) ------------------------------------------------------
 
 def _minimax_env_active():
@@ -3931,6 +4070,17 @@ def _collect_provider_rows(config, now=None):
                         _write_provider_cache(entry["id"], {
                             "timestamp": data_ts, "usage": usage,
                             "src": r["src"], "plan": tier})
+                # the API sees the whole shared pool; rollouts are only the
+                # fallback, since a file's mtime can postdate its last quota event
+                api = _refresh_codex_api(entry, config, now, budget)
+                try:
+                    api_ts = float(api.get("timestamp") or 0)
+                except (TypeError, ValueError):
+                    api_ts = 0.0
+                if api.get("usage") and (now - api_ts < _PROVIDER_STALE_AFTER
+                                         or api_ts >= float(data_ts or 0)):
+                    usage, data_ts = api["usage"], api_ts
+                    tier = api.get("plan") or tier
             elif ptype == "gemini":
                 r = _read_gemini_quota(loc, entry.get("bucket", "gemini"), now) if loc else None
                 if r:
@@ -3949,9 +4099,10 @@ def _collect_provider_rows(config, now=None):
             data_ts = float(data_ts) if data_ts is not None else None
         except (TypeError, ValueError):
             data_ts = None
-        # Only polled sources go stale. agy / Codex / custom files are
-        # rewritten on every use, so an old file means "no use since" — true.
-        stale = bool(ptype in ("claude", "minimax") and usage and data_ts
+        # Polled sources go stale. Codex too: its pool is shared with the web
+        # and other machines, so an old rollout does not mean "no use since".
+        # agy / custom files are rewritten on every use, so old means unused
+        stale = bool(ptype in ("claude", "minimax", "codex") and usage and data_ts
                      and now - data_ts > _PROVIDER_STALE_AFTER)
         rows.append({"entry": entry, "label": _provider_row_label(entry),
                      "usage": usage, "data_ts": data_ts, "stale": stale,
@@ -9878,7 +10029,7 @@ def detect_providers(config=None):
     * Claude: ``~/.claude``, ``~/.claude-*`` and ``$CLAUDE_CONFIG_DIR``, kept
       only when ``.credentials.json`` holds a token (on macOS a dir that has
       only a Keychain login is listed as ``keychain-only``, disabled).
-    * Codex: ``$CODEX_HOME`` or ``~/.codex`` with a rollout file.
+    * Codex: ``$CODEX_HOME`` or ``~/.codex`` with a rollout file or a ChatGPT login.
     * Gemini: ``~/.gemini/antigravity-cli*/statusline_last_live.json``.
     * MiniMax: the ``mmx`` CLI on PATH (always ``enabled: False`` unless the
       user enabled it: it spawns a process).
@@ -9963,18 +10114,21 @@ def detect_providers(config=None):
     try:
         codex = _codex_home(configured.get("codex"))
         files = _find_codex_rollouts(codex, 1)
-        if files:
-            st = files[0].stat()
+        # a fresh `codex login` has no rollout yet, but the usage API already works
+        token, _ = _read_codex_token(codex, now)
+        if files or token:
+            mtime = files[0].stat().st_mtime if files else None
             found_rl = None
             try:
-                found_rl = _codex_rate_limits_from_tail(files[0], now)
+                found_rl = _codex_rate_limits_from_tail(files[0], now) if files else None
             except OSError:
                 pass
+            token = None
             _add({"id": "codex", "type": "codex", "label": "Codex", "path": _tilde(codex),
                   "active": False, "enabled": True,
                   "tier": found_rl[1] if found_rl else None,
-                  "age_seconds": _age_seconds(st.st_mtime, now),
-                  "note": "ok" if found_rl else "no rate limits in newest rollout yet"})
+                  "age_seconds": _age_seconds(mtime, now),
+                  "note": "ok" if found_rl or not files else "no rate limits in newest rollout yet"})
     except Exception:
         pass
 
